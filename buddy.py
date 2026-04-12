@@ -62,8 +62,6 @@ def run_daemon():
     class SocketServer(QThread):
         show_signal = pyqtSignal(dict)   # carries payload dict
         hide_signal = pyqtSignal()
-        approve_signal = pyqtSignal()
-        deny_signal = pyqtSignal()
         cancel_signal = pyqtSignal(str)  # carries pipe path
 
         def run(self):
@@ -87,10 +85,6 @@ def run_daemon():
                         self.show_signal.emit(msg)
                     elif cmd == "hide":
                         self.hide_signal.emit()
-                    elif cmd == "approve":
-                        self.approve_signal.emit()
-                    elif cmd == "deny":
-                        self.deny_signal.emit()
                     elif cmd == "cancel":
                         self.cancel_signal.emit(msg.get("pipe", ""))
                 except Exception:
@@ -204,6 +198,189 @@ def run_daemon():
             painter.drawPath(path)
             painter.end()
 
+    class _SessionPill(QWidget):
+        """Self-contained pill for one pending session request."""
+
+        approved      = pyqtSignal(str)        # pipe path
+        denied        = pyqtSignal(str)        # pipe path
+        always        = pyqtSignal(str, str)   # pipe path, destination ("session"/"project")
+        go_session    = pyqtSignal(str)        # iterm_session value
+        activated     = pyqtSignal(int)        # index within parent queue
+        expand_changed = pyqtSignal(bool)      # True=expanded, False=collapsed
+
+        def __init__(self, req: dict, index: int, is_active: bool, parent=None):
+            super().__init__(parent)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self._req = req
+            self._index = index
+            self._is_active = is_active
+            self._expanded = is_active  # active pill starts expanded
+
+            self.setFixedWidth(200)
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            root = QVBoxLayout(self)
+            root.setContentsMargins(0, 0, 0, 0)
+            root.setSpacing(0)
+
+            # ── Pill background widget ──────────────────────────────────────────
+            self._pill_bg = PillWidget(self)
+            self._pill_bg.setFixedWidth(200)
+            risk = req.get("risk", "medium")
+            self._pill_bg.set_risk(risk)
+            root.addWidget(self._pill_bg)
+
+            pill_layout = QVBoxLayout(self._pill_bg)
+            pill_layout.setContentsMargins(12, 8, 12, 8)
+            pill_layout.setSpacing(0)
+
+            # Project / cwd label
+            cwd = req.get("cwd", "")
+            self._source_label = QLabel(cwd)
+            colors = RISK_COLORS.get(risk, RISK_COLORS["medium"])
+            self._source_label.setStyleSheet(
+                f"font-size: 11px; font-weight: 600; color: {colors['text']};"
+                " padding: 0px; margin: 0px;"
+            )
+            self._source_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._source_label.setFixedHeight(16)
+            self._source_label.setVisible(bool(cwd))
+            pill_layout.addWidget(self._source_label)
+
+            # Intent (compact, elided)
+            intent = req.get("intent", "Waiting for approval")
+            self._intent_label = QLabel()
+            self._intent_label.setStyleSheet(
+                f"font-size: 12px; color: {colors['text']}; padding: 0px; margin: 0px;"
+            )
+            self._intent_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._intent_label.setFixedHeight(18)
+            self._intent_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            fm = self._intent_label.fontMetrics()
+            elided = fm.elidedText(intent, Qt.TextElideMode.ElideRight, 200 - 24)
+            self._intent_label.setText(elided)
+            pill_layout.addWidget(self._intent_label)
+
+            # ── Expanded section ────────────────────────────────────────────────
+            from PyQt6.QtWidgets import QFrame
+            self._expanded_widget = QWidget()
+            self._expanded_widget.setVisible(self._expanded)
+            exp_layout = QVBoxLayout(self._expanded_widget)
+            exp_layout.setContentsMargins(0, 8, 0, 0)
+            exp_layout.setSpacing(8)
+
+            divider = QFrame()
+            divider.setFrameShape(QFrame.Shape.HLine)
+            divider.setStyleSheet("color: #222; background: #222;")
+            divider.setFixedHeight(1)
+            exp_layout.addWidget(divider)
+
+            full_intent_label = QLabel(intent)
+            full_intent_label.setStyleSheet(
+                "color: white; font-size: 12px; font-weight: bold;"
+            )
+            full_intent_label.setWordWrap(True)
+            full_intent_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            exp_layout.addWidget(full_intent_label)
+
+            mode = req.get("mode", "approval")
+            is_attention = mode == "attention"
+
+            approve_btn = QPushButton("Yes")
+            approve_btn.setStyleSheet(
+                "background: #2d6a4f; border: 1px solid #40916c; color: #d8f3dc;"
+                " border-radius: 6px; padding: 6px; font-size: 11px; font-weight: 600;"
+            )
+            approve_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            approve_btn.setVisible(not is_attention)
+            approve_btn.clicked.connect(lambda: self.approved.emit(req.get("pipe", DECISION_PIPE)))
+            exp_layout.addWidget(approve_btn)
+
+            suggestions = req.get("suggestions", [])
+            if suggestions:
+                dest = suggestions[0].get("destination", "session")
+                always_label = "Yes, always allow for project" if dest == "project" else "Yes, always allow for session"
+                always_btn = QPushButton(always_label)
+                always_btn.setStyleSheet(
+                    "background: transparent; border: 1px solid #555; color: #aaa;"
+                    " border-radius: 6px; padding: 6px; font-size: 11px;"
+                )
+                always_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                always_btn.setVisible(not is_attention)
+                always_btn.clicked.connect(
+                    lambda: self.always.emit(req.get("pipe", DECISION_PIPE), dest)
+                )
+                exp_layout.addWidget(always_btn)
+
+            deny_btn = QPushButton("No")
+            deny_btn.setStyleSheet(
+                "background: transparent; border: 1px solid #6b2d2d; color: #c97a7a;"
+                " border-radius: 6px; padding: 6px; font-size: 11px;"
+            )
+            deny_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            deny_btn.setVisible(not is_attention)
+            deny_btn.clicked.connect(lambda: self.denied.emit(req.get("pipe", DECISION_PIPE)))
+            exp_layout.addWidget(deny_btn)
+
+            if is_attention:
+                go_style = (
+                    "background: #1a3a4a; border: 1px solid #00bcd4; color: #00bcd4;"
+                    " border-radius: 6px; padding: 8px; font-size: 11px; font-weight: 500;"
+                )
+            else:
+                go_style = (
+                    "background: transparent; border: none; color: #555;"
+                    " padding: 4px; font-size: 10px;"
+                )
+            go_btn = QPushButton("Go to session")
+            go_btn.setStyleSheet(go_style)
+            go_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            go_btn.clicked.connect(
+                lambda: self.go_session.emit(req.get("iterm_session", ""))
+            )
+            exp_layout.addWidget(go_btn)
+
+            pill_layout.addWidget(self._expanded_widget)
+
+            # ── Count badge (only on index 0 when n > 1) ───────────────────────
+            # Lives INSIDE pill_bg so it is never clipped by the window edge.
+            self._badge = QLabel("")
+            self._badge.setParent(self._pill_bg)
+            self._badge.setFixedSize(18, 18)
+            self._badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._badge.setStyleSheet(
+                "background: #f44336; color: white; font-size: 10px; font-weight: 700;"
+                " border-radius: 9px;"
+            )
+            self._badge.hide()
+            self._badge.raise_()
+
+        def set_badge(self, count: int):
+            """Show/hide the count badge. count=0 hides it."""
+            if count > 1:
+                self._badge.setText(str(count))
+                # Inset 4px from top-right of pill_bg
+                self._badge.move(self._pill_bg.width() - 22, 4)
+                self._badge.show()
+                self._badge.raise_()
+            else:
+                self._badge.hide()
+
+        def toggle_expand(self):
+            self._expanded = not self._expanded
+            self._expanded_widget.setVisible(self._expanded)
+            self._pill_bg.adjustSize()
+            self.adjustSize()
+            self.expand_changed.emit(self._expanded)
+
+        def mousePressEvent(self, event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                if self._is_active:
+                    self.toggle_expand()
+                else:
+                    self.activated.emit(self._index)
+            super().mousePressEvent(event)
+
     class ChipWidget(QWidget):
         """Single chip with multi-session queue support."""
 
@@ -279,8 +456,38 @@ def run_daemon():
         # ── Sessions ───────────────────────────────────────────────────────────
 
         def _rebuild_sessions(self):
-            """Rebuild the sessions container. Implemented in Task 3."""
-            pass
+            """Clear and repopulate the sessions container with _SessionPill widgets."""
+            # Remove existing pills
+            while self._container_layout.count():
+                item = self._container_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+            if not self._requests:
+                self._update_window_size()
+                return
+
+            n = len(self._requests)
+            for i, req in enumerate(self._requests):
+                is_active = (i == self._current_index)
+                pill = _SessionPill(req, i, is_active)
+
+                # Badge only on first pill, count = total sessions
+                if i == 0:
+                    pill.set_badge(n)
+
+                # Wire signals
+                pill.approved.connect(self._on_pill_approved)
+                pill.denied.connect(self._on_pill_denied)
+                pill.always.connect(self._on_pill_always)
+                pill.go_session.connect(self._on_pill_go_session)
+                pill.activated.connect(self._on_pill_activated)
+                if is_active:
+                    pill.expand_changed.connect(self._on_active_pill_expand_changed)
+
+                self._container_layout.addWidget(pill)
+
+            self._update_window_size()
 
         # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -340,19 +547,46 @@ def run_daemon():
             self._current_index = 0
             self.hide()
 
-        def _resolve_current(self, decision: str):
-            if not self._requests:
-                return
-            req = self._requests[self._current_index]
-            pipe = req.get("pipe", DECISION_PIPE)
-            _write_decision(decision, pipe)
-            self._requests.pop(self._current_index)
-            if not self._requests:
-                self.do_hide()
-                return
-            self._current_index = min(self._current_index, len(self._requests) - 1)
-            self._expanded = False
+        # ── Pill signal handlers ───────────────────────────────────────────────
+
+        def _on_pill_approved(self, pipe: str):
+            _write_decision("allow", pipe)
+            self._remove_by_pipe(pipe)
+
+        def _on_pill_denied(self, pipe: str):
+            _write_decision("block", pipe)
+            self._remove_by_pipe(pipe)
+
+        def _on_pill_always(self, pipe: str, destination: str):
+            _write_decision("allow", pipe)
+            self._remove_by_pipe(pipe)
+
+        def _on_pill_go_session(self, iterm_session: str):
+            self._focus_terminal_with_session(iterm_session)
+
+        def _on_pill_activated(self, index: int):
+            self._current_index = index
             self._rebuild_sessions()
+
+        def _on_active_pill_expand_changed(self, expanded: bool):
+            if expanded:
+                self._bob_timer.stop()
+                self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
+            else:
+                self._bob_tick = 0
+                self._bob_timer.start()
+            self._update_window_size()
+
+        def _remove_by_pipe(self, pipe: str):
+            for i, req in enumerate(self._requests):
+                if req.get("pipe", DECISION_PIPE) == pipe:
+                    self._requests.pop(i)
+                    if not self._requests:
+                        self.do_hide()
+                        return
+                    self._current_index = min(self._current_index, len(self._requests) - 1)
+                    self._rebuild_sessions()
+                    return
 
         # ── Actions ────────────────────────────────────────────────────────────
 
@@ -369,11 +603,8 @@ def run_daemon():
 
         # ── Terminal focus ─────────────────────────────────────────────────────
 
-        def _focus_terminal(self):
-            if not self._requests:
-                return
-            req = self._requests[self._current_index]
-            claude_uuid = req.get("iterm_session", "")
+        def _focus_terminal_with_session(self, iterm_session: str):
+            claude_uuid = iterm_session
             if claude_uuid:
                 claude_uuid = claude_uuid.split(":")[1] if ":" in claude_uuid else claude_uuid
                 script = f'''
