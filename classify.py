@@ -146,6 +146,11 @@ def get_risk(tool_lower, inp_dict):
 
 risk = get_risk(tool_lower, inp)
 
+# Description-first: use Claude's own plain-English label if present
+_description = inp.get("description", "").strip()
+if _description:
+    out(_description, risk)
+
 if tool_lower == "askuserquestion":
     out("Needs your attention", "low", mode="attention")
 
