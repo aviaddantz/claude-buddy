@@ -219,19 +219,16 @@ def run_daemon():
             self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
             self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
 
-            # Request queue
-            self._requests = []    # list of payload dicts
-            self._current_index = 0
-
-            self._expanded = False
-            self._anchor_x = 0
-
             self.setFixedWidth(200)
 
             SPRITE_H = 32
             SPRITE_W = 40
-            SPRITE_GAP = 14
             BOB_AMP = 8
+
+            # Request queue
+            self._requests = []
+            self._current_index = 0
+            self._expanded = False  # tracks expanded state of active pill
 
             # --- Sprite ---
             self.sprite = SpriteWidget(self)
@@ -240,89 +237,15 @@ def run_daemon():
             self.sprite.move((200 - SPRITE_W) // 2, self._sprite_rest_y)
             self.sprite.raise_()
 
-            # --- Pill ---
-            self._pill = PillWidget(self)
-            self._pill.setFixedWidth(200)
-            self._pill_top = BOB_AMP + SPRITE_H + SPRITE_GAP
-            self._pill.move(0, self._pill_top)
-            self._pill.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            pill_layout = QVBoxLayout(self._pill)
-            pill_layout.setContentsMargins(12, 8, 12, 8)
-            pill_layout.setSpacing(0)
+            self._sprite_h = BOB_AMP + SPRITE_H  # top of sessions container
 
-            # Source / project label (prominent)
-            self._source_label = QLabel("")
-            self._source_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #aaa; padding: 0px; margin: 0px;")
-            self._source_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._source_label.setFixedHeight(16)
-            pill_layout.addWidget(self._source_label)
-
-            # Intent label (compact, elided)
-            self._intent_label = QLabel("")
-            self._intent_label.setStyleSheet("font-size: 12px; padding: 0px; margin: 0px;")
-            self._intent_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._intent_label.setFixedHeight(18)
-            self._intent_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-            pill_layout.addWidget(self._intent_label)
-
-            # --- Expanded section ---
-            from PyQt6.QtWidgets import QFrame
-            self._expanded_widget = QWidget()
-            self._expanded_widget.setVisible(False)
-            exp_layout = QVBoxLayout(self._expanded_widget)
-            exp_layout.setContentsMargins(0, 8, 0, 0)
-            exp_layout.setSpacing(8)
-
-            divider = QFrame()
-            divider.setFrameShape(QFrame.Shape.HLine)
-            divider.setStyleSheet("color: #222; background: #222;")
-            divider.setFixedHeight(1)
-            exp_layout.addWidget(divider)
-
-            self._full_intent_label = QLabel("")
-            self._full_intent_label.setStyleSheet("color: white; font-size: 12px; font-weight: bold;")
-            self._full_intent_label.setWordWrap(True)
-            self._full_intent_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            exp_layout.addWidget(self._full_intent_label)
-
-            self._approve_btn = QPushButton("Yes")
-            self._approve_btn.setStyleSheet(
-                "background: #2d6a4f; border: 1px solid #40916c; color: #d8f3dc;"
-                " border-radius: 6px; padding: 6px; font-size: 11px; font-weight: 600;"
-            )
-            self._approve_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._approve_btn.clicked.connect(self._on_approve)
-            exp_layout.addWidget(self._approve_btn)
-
-            self._always_allow_btn = QPushButton("Yes, always allow for session")
-            self._always_allow_btn.setStyleSheet(
-                "background: transparent; border: 1px solid #555; color: #aaa;"
-                " border-radius: 6px; padding: 6px; font-size: 11px;"
-            )
-            self._always_allow_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._always_allow_btn.clicked.connect(self._on_always_allow)
-            self._always_allow_btn.setVisible(False)
-            exp_layout.addWidget(self._always_allow_btn)
-
-            self._deny_btn = QPushButton("No")
-            self._deny_btn.setStyleSheet(
-                "background: transparent; border: 1px solid #6b2d2d; color: #c97a7a;"
-                " border-radius: 6px; padding: 6px; font-size: 11px;"
-            )
-            self._deny_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._deny_btn.clicked.connect(self._on_deny)
-            exp_layout.addWidget(self._deny_btn)
-
-            self._go_btn = QPushButton("Go to session")
-            self._go_btn.setStyleSheet(
-                "background: transparent; border: none; color: #555;"
-                " padding: 4px; font-size: 10px;"
-            )
-            self._go_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._go_btn.clicked.connect(self._on_go_session)
-            exp_layout.addWidget(self._go_btn)
-
-            pill_layout.addWidget(self._expanded_widget)
+            # --- Sessions container ---
+            self._container = QWidget(self)
+            self._container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self._container.move(0, self._sprite_h)
+            self._container_layout = QVBoxLayout(self._container)
+            self._container_layout.setContentsMargins(0, 0, 0, 0)
+            self._container_layout.setSpacing(6)
 
             # Bob animation
             import math
@@ -335,8 +258,7 @@ def run_daemon():
                 self.sprite.move((200 - SPRITE_W) // 2, self._sprite_rest_y - offset)
             self._bob_timer.timeout.connect(_bob_step)
 
-            # Staleness timer: remove requests whose notify.sh process has died
-            # Catches SIGKILL cases where the EXIT trap can't fire
+            # Staleness timer
             self._stale_timer = QTimer()
             self._stale_timer.setInterval(1000)
             self._stale_timer.timeout.connect(self._cleanup_stale_requests)
@@ -345,74 +267,20 @@ def run_daemon():
             self.setCursor(Qt.CursorShape.PointingHandCursor)
             QTimer.singleShot(100, self._pin_to_all_spaces)
 
-        # ── Queue helpers ──────────────────────────────────────────────────────
+        # ── Layout helpers ─────────────────────────────────────────────────────
 
-        def _switch_to(self, index: int):
-            """Switch displayed request to the given queue index."""
-            self._current_index = index
-            self._display_request(index)
+        def _update_window_size(self):
+            self._container.adjustSize()
+            container_h = self._container.sizeHint().height()
+            self._container.setFixedSize(200, max(container_h, 1))
+            total_h = self._sprite_h + container_h
+            self.setFixedHeight(max(total_h, self._sprite_h + 10))
 
-        def _display_request(self, index: int):
-            """Update chip content to show the request at index."""
-            if not self._requests:
-                return
-            req = self._requests[index]
-            tool = req.get("tool", "Tool")
-            intent = req.get("intent", "Waiting for approval")
-            risk = req.get("risk", "medium")
-            cwd = req.get("cwd", "")
-            suggestions = req.get("suggestions", [])
-            mode = req.get("mode", "approval")
+        # ── Sessions ───────────────────────────────────────────────────────────
 
-            self._pill.set_risk(risk)
-            colors = RISK_COLORS.get(risk, RISK_COLORS["medium"])
-
-            self._source_label.setText(cwd)
-            self._source_label.setStyleSheet(
-                f"font-size: 11px; font-weight: 600; color: #aaa; padding: 0px; margin: 0px;"
-            )
-            self._source_label.setVisible(bool(cwd))
-
-            fm = self._intent_label.fontMetrics()
-            available_w = self._pill.width() - 24
-            elided = fm.elidedText(intent, Qt.TextElideMode.ElideRight, available_w)
-            self._intent_label.setText(elided)
-            self._intent_label.setStyleSheet(
-                f"font-size: 12px; color: {colors['text']}; padding: 0px; margin: 0px;"
-            )
-
-            self._full_intent_label.setText(intent)
-
-            # Always-allow button
-            if suggestions:
-                s = suggestions[0]
-                dest = s.get("destination", "session")
-                label = "Yes, always allow for project" if dest == "project" else "Yes, always allow for session"
-                self._always_allow_btn.setText(label)
-            self._always_allow_btn.setVisible(bool(suggestions))
-
-            # Attention mode: show only go-to-session
-            is_attention = mode == "attention"
-            self._approve_btn.setVisible(not is_attention)
-            self._always_allow_btn.setVisible(not is_attention and bool(suggestions))
-            self._deny_btn.setVisible(not is_attention)
-            self._go_btn.setVisible(True)
-            if is_attention:
-                self._go_btn.setStyleSheet(
-                    "background: #1a3a4a; border: 1px solid #00bcd4; color: #00bcd4;"
-                    " border-radius: 6px; padding: 8px; font-size: 11px; font-weight: 500;"
-                )
-            else:
-                self._go_btn.setStyleSheet(
-                    "background: transparent; border: none; color: #555;"
-                    " padding: 4px; font-size: 10px;"
-                )
-
-            # Only force compact height when not expanded — preserve expanded state on tab switch
-            if not self._expanded:
-                compact_h = 8 + (16 if cwd else 0) + 18 + 8
-                self._pill.setFixedHeight(compact_h)
-            self._pill.adjustSize()
+        def _rebuild_sessions(self):
+            """Rebuild the sessions container. Implemented in Task 3."""
+            pass
 
         # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -426,7 +294,7 @@ def run_daemon():
                 if not pid:
                     continue
                 try:
-                    os.kill(pid, 0)  # signal 0 = existence check only
+                    os.kill(pid, 0)
                 except OSError:
                     stale.append(i)
             if not stale:
@@ -437,28 +305,20 @@ def run_daemon():
                 self.do_hide()
                 return
             self._current_index = min(self._current_index, len(self._requests) - 1)
-            self._display_request(self._current_index)
-
-        def _apply_risk_style(self):
-            if not self._requests:
-                return
-            req = self._requests[self._current_index]
-            risk = req.get("risk", "medium")
-            self._pill.set_risk(risk)
+            self._rebuild_sessions()
 
         def _position_window(self):
             screen = QApplication.primaryScreen().geometry()
+            self._update_window_size()
             self._base_y = 80
             self.move(screen.width() - self.width() - 20, self._base_y)
 
         def do_show(self, payload: dict):
             was_empty = len(self._requests) == 0
             self._requests.append(payload)
-
             if was_empty:
                 self._current_index = 0
-                self._collapse()
-                self._display_request(0)
+                self._expanded = False
                 self._position_window()
                 self.show()
                 self._pin_to_all_spaces()
@@ -470,72 +330,33 @@ def run_daemon():
                     print(f"[buddy] orderFrontRegardless failed: {e}", file=sys.stderr)
                 self._bob_tick = 0
                 self._bob_timer.start()
+            self._rebuild_sessions()
 
         def do_hide(self):
             self._bob_timer.stop()
             self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
-            self._collapse()
+            self._expanded = False
             self._requests = []
             self._current_index = 0
             self.hide()
 
         def _resolve_current(self, decision: str):
-            """Write decision for current request and advance queue."""
             if not self._requests:
                 return
             req = self._requests[self._current_index]
             pipe = req.get("pipe", DECISION_PIPE)
             _write_decision(decision, pipe)
             self._requests.pop(self._current_index)
-
             if not self._requests:
                 self.do_hide()
                 return
-
-            # Clamp index and show next
             self._current_index = min(self._current_index, len(self._requests) - 1)
-            self._collapse()
-            self._display_request(self._current_index)
-
-        def _expand(self):
-            if self._expanded:
-                return
-            self._expanded = True
-            self._pill.setMaximumHeight(16777215)
-            self._pill.setMinimumHeight(0)
-            self._expanded_widget.setVisible(True)
-            self._pill.adjustSize()
-
-        def _collapse(self):
-            if not self._expanded:
-                return
             self._expanded = False
-            self._expanded_widget.setVisible(False)
-            if self._requests:
-                req = self._requests[self._current_index]
-                cwd = req.get("cwd", "")
-                compact_h = 8 + (16 if cwd else 0) + 18 + 8
-                self._pill.setFixedHeight(compact_h)
-
-        def mousePressEvent(self, event):
-            if event.button() == Qt.MouseButton.LeftButton:
-                if self._expanded:
-                    self._collapse()
-                    self._bob_timer.start()
-                else:
-                    self._bob_timer.stop()
-                    self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
-                    self._expand()
-            super().mousePressEvent(event)
+            self._rebuild_sessions()
 
         # ── Actions ────────────────────────────────────────────────────────────
 
-        def _on_go_session(self):
-            """Focus terminal for current request — no decision written, widget stays."""
-            self._focus_terminal()
-
         def _on_cancel(self, pipe_path: str):
-            """Remove a request from the queue when its notify.sh was interrupted."""
             for i, req in enumerate(self._requests):
                 if req.get("pipe", "") == pipe_path:
                     self._requests.pop(i)
@@ -543,18 +364,8 @@ def run_daemon():
                         self.do_hide()
                         return
                     self._current_index = min(self._current_index, len(self._requests) - 1)
-                    self._collapse()
-                    self._display_request(self._current_index)
+                    self._rebuild_sessions()
                     return
-
-        def _on_approve(self):
-            self._resolve_current("approve")
-
-        def _on_deny(self):
-            self._resolve_current("deny")
-
-        def _on_always_allow(self):
-            self._resolve_current("always_allow")
 
         # ── Terminal focus ─────────────────────────────────────────────────────
 
@@ -619,8 +430,6 @@ end tell
     server_thread = SocketServer()
     server_thread.show_signal.connect(window.do_show)
     server_thread.hide_signal.connect(window.do_hide)
-    server_thread.approve_signal.connect(window._on_approve)
-    server_thread.deny_signal.connect(window._on_deny)
     server_thread.cancel_signal.connect(window._on_cancel)
     server_thread.daemon = True
     server_thread.start()
