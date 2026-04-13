@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# Local Claude Code tooling
+.claude/
+
+# Superpowers brainstorm artifacts
+.superpowers/
+
+# Design specs and implementation plans (internal/personal)
+docs/superpowers/
+
+# Backups and test artifacts
+*.bak
+test-*.txt
+
+# Local project artifacts
+docs/design-comparison.html
+docs/2026-04-05-buddy-approval-ui-design.md
+CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
