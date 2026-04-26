@@ -15,6 +15,7 @@ echo "[notify.sh $$] started mode=$MODE" >> /tmp/claude-buddy.log
 # On exit: always tell daemon to remove this request from queue (idempotent — no-op if already resolved via widget)
 trap '
   _PIPE="$PIPE"
+  echo "[notify.sh $$] EXIT trap fired, removing pipe $_PIPE" >> /tmp/claude-buddy.log
   rm -f "$_PIPE"
   python3 -c "
 import socket, sys, json
@@ -172,15 +173,20 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
     TRANSCRIPT_MTIME=$(stat -f "%m" "$TRANSCRIPT" 2>/dev/null || echo "")
 fi
 
-# Wait for user decision — poll with 1s timeout so we can detect if Claude Code
-# moved on via transcript file changed or parent process gone (ESC)
+# Wait for user decision — poll with short timeout so we can detect if Claude Code
+# moved on via transcript changed, parent killed, or reparented
 HOOK_PPID="$PPID"
 DECISION=""
 while [ -z "$DECISION" ]; do
-    DECISION=$(timeout 1 cat "$PIPE" 2>/dev/null || true)
+    DECISION=$(timeout 0.3 cat "$PIPE" 2>/dev/null || true)
     if [ -z "$DECISION" ]; then
         # ESC / abort: parent shell killed by Claude Code
         if ! kill -0 "$HOOK_PPID" 2>/dev/null; then
+            break
+        fi
+        # Reparented: parent was killed, we got adopted by launchd/init
+        CURRENT_PPID=$(ps -p $$ -o ppid= 2>/dev/null | tr -d ' ')
+        if [ -n "$CURRENT_PPID" ] && [ "$CURRENT_PPID" != "$HOOK_PPID" ]; then
             break
         fi
         # Check transcript mtime: Claude Code wrote new content (terminal answered)

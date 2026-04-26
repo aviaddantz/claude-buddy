@@ -548,7 +548,7 @@ def run_daemon():
 
             # Staleness timer
             self._stale_timer = QTimer()
-            self._stale_timer.setInterval(1000)
+            self._stale_timer.setInterval(500)
             self._stale_timer.timeout.connect(self._cleanup_stale_requests)
             self._stale_timer.start()
 
@@ -631,18 +631,40 @@ def run_daemon():
         # ── Lifecycle ──────────────────────────────────────────────────────────
 
         def _cleanup_stale_requests(self):
-            """Remove requests whose notify.sh process has exited (including SIGKILL)."""
+            """Remove requests whose notify.sh process has exited."""
             if not self._requests:
                 return
             stale = []
             for i, req in enumerate(self._requests):
+                pipe_path = req.get("pipe", "")
                 pid = req.get("notify_pid", 0)
+
+                # Fast path: pipe file removed = EXIT trap ran, request resolved
+                if pipe_path and not os.path.exists(pipe_path):
+                    stale.append(i)
+                    continue
+
                 if not pid:
                     continue
+
+                # Process fully dead
                 try:
                     os.kill(pid, 0)
                 except OSError:
                     stale.append(i)
+                    continue
+
+                # Zombie detection: os.kill(0) succeeds for zombies
+                try:
+                    result = subprocess.run(
+                        ["ps", "-p", str(pid), "-o", "state="],
+                        capture_output=True, text=True, timeout=1
+                    )
+                    if result.stdout.strip().startswith("Z"):
+                        stale.append(i)
+                except Exception:
+                    pass
+
             if not stale:
                 return
             for i in reversed(stale):
