@@ -794,13 +794,18 @@ end tell
                     NSWindowCollectionBehaviorCanJoinAllSpaces,
                     NSWindowCollectionBehaviorMoveToActiveSpace,
                     NSWindowCollectionBehaviorFullScreenAuxiliary,
+                    NSWindowCollectionBehaviorStationary,
+                    NSWindowCollectionBehaviorIgnoresCycle,
                 )
                 for win in NSApp.windows():
                     behavior = win.collectionBehavior()
                     behavior &= ~NSWindowCollectionBehaviorMoveToActiveSpace
                     behavior |= NSWindowCollectionBehaviorCanJoinAllSpaces
                     behavior |= NSWindowCollectionBehaviorFullScreenAuxiliary
+                    behavior |= NSWindowCollectionBehaviorStationary
+                    behavior |= NSWindowCollectionBehaviorIgnoresCycle
                     win.setCollectionBehavior_(behavior)
+                    win.setLevel_(25)  # NSStatusWindowLevel — above normal windows but not full-screen apps
             except Exception as e:
                 print(f"[buddy] _pin_to_all_spaces failed: {e}", file=sys.stderr)
 
