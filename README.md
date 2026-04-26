@@ -17,33 +17,24 @@ When Claude Code requests tool permissions, instead of switching to the terminal
 ## Requirements
 
 * macOS
-* Python 3.6+
-* PyQt6 (`pip install PyQt6`)
+* Python 3.6+ (the installer will check and help you install it)
 
 ## Setup
 
-**1. Clone the repo**
 ```bash
-git clone https://github.com/aviaddantz/claude-buddy.git ~/Development/nudge
+git clone https://github.com/aviaddantz/claude-buddy.git
+bash claude-buddy/install.sh
 ```
 
-**2. Install dependencies**
+The installer handles everything: Python check, PyQt6, and Claude Code hook configuration. It will ask where you want to install (default: `~/claude-buddy`).
+
+Start Claude Code and the widget launches automatically.
+
+## Uninstall
+
 ```bash
-pip install PyQt6
+bash ~/claude-buddy/uninstall.sh
 ```
-
-**3. Add hooks to `~/.claude/settings.json`**
-```json
-{
-  "hooks": {
-    "SessionStart": [{"command": "bash ~/Development/nudge/start-daemon.sh"}],
-    "PermissionRequest": [{"command": "bash ~/Development/nudge/notify.sh approval"}],
-    "Stop": [{"command": "bash ~/Development/nudge/notify.sh done"}]
-  }
-}
-```
-
-**4. Start Claude Code** -- the widget launches automatically.
 
 ## Manual controls
 
