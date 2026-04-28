@@ -155,17 +155,36 @@ print(json.dumps({
 }))
 " "$TOOL_NAME" "$INTENT" "$RISK" "$PIPE" "$CWD" "$SUGGESTIONS" "$MODE" "$ITERM_SESSION" "$$" "$TOOL_INPUT" 2>/dev/null)
 
+BUDDY_CONNECTED=false
 python3 -c "
 import socket, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.settimeout(2)
-try:
-    s.connect('/tmp/claude-buddy.sock')
-    s.sendall(sys.argv[1].encode())
-    s.close()
-except Exception as e:
-    sys.stderr.write(f'[notify] buddy connect failed: {e}\n')
-" "$PAYLOAD" 2>/dev/null || true
+s.connect('/tmp/claude-buddy.sock')
+s.sendall(sys.argv[1].encode())
+s.close()
+" "$PAYLOAD" 2>/dev/null && BUDDY_CONNECTED=true
+
+if [ "$BUDDY_CONNECTED" = false ]; then
+    echo "[notify.sh $$] daemon not reachable, auto-starting..." >> /tmp/claude-buddy.log
+    bash "$SCRIPT_DIR/start-daemon.sh" 2>/dev/null
+    sleep 1.5
+    python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(2)
+s.connect('/tmp/claude-buddy.sock')
+s.sendall(sys.argv[1].encode())
+s.close()
+" "$PAYLOAD" 2>/dev/null && BUDDY_CONNECTED=true
+fi
+
+if [ "$BUDDY_CONNECTED" = false ]; then
+    echo "[notify.sh $$] daemon unreachable after auto-start attempt, falling through to allow" >> /tmp/claude-buddy.log
+    rm -f "$PIPE"
+    echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}'
+    exit 0
+fi
 
 # Snapshot transcript mtime so we can detect when Claude Code moves on
 TRANSCRIPT_MTIME=""
