@@ -27,7 +27,7 @@ struct NudgeApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Button(daemon.isRunning ? "● Active" : "○ Inactive") {}
+            Button(daemon.isRunning ? "Active" : "Inactive") {}
                 .disabled(true)
 
             Divider()
@@ -45,11 +45,10 @@ struct NudgeApp: App {
 
             Divider()
 
-            Button {
-                daemon.toggleLaunchAtLogin()
-            } label: {
-                Text(daemon.launchAtLogin ? "✓ Launch at Login" : "  Launch at Login")
-            }
+            Toggle("Launch at Login", isOn: Binding(
+                get: { daemon.launchAtLogin },
+                set: { _ in daemon.toggleLaunchAtLogin() }
+            ))
 
             Divider()
 
