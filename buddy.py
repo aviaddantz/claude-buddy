@@ -834,6 +834,9 @@ end tell
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
+    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+    NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
     window = ChipWidget()
 
     server_thread = SocketServer()
