@@ -1,4 +1,5 @@
 #!/bin/bash
+[ -f /tmp/claude-buddy-disabled ] && exit 0
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 pkill -f "buddy.py daemon" 2>/dev/null
 sleep 0.5

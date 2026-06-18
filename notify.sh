@@ -128,6 +128,14 @@ except Exception:
     print('approval')
 " 2>/dev/null || echo "approval")
 
+# Auto-approve low-risk operations without showing any pill (unless disabled via menu bar)
+if [ "$RISK" = "low" ] && [ ! -f "$HOME/.nudge-autoapprove-disabled" ]; then
+    echo "[notify.sh $$] auto-approving low-risk tool=$TOOL_NAME" >> /tmp/claude-buddy.log
+    rm -f "$PIPE"
+    echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}'
+    exit 0
+fi
+
 # Create named pipe for decision response
 rm -f "$PIPE"
 mkfifo "$PIPE"

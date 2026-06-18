@@ -45,6 +45,11 @@ struct NudgeApp: App {
 
             Divider()
 
+            Toggle("Auto-approve safe operations", isOn: Binding(
+                get: { daemon.autoApproveLow },
+                set: { _ in daemon.toggleAutoApproveLow() }
+            ))
+
             Toggle("Launch at Login", isOn: Binding(
                 get: { daemon.launchAtLogin },
                 set: { _ in daemon.toggleLaunchAtLogin() }

@@ -25,3 +25,7 @@ CLAUDE.md
 # Python
 __pycache__/
 *.pyc
+
+# Swift build artifacts
+NudgeApp/.build/
+NudgeApp/Nudge.app/

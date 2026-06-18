@@ -4,12 +4,16 @@ import ServiceManagement
 final class DaemonController: ObservableObject {
     @Published var isRunning = false
     @Published var launchAtLogin = false
+    @Published var autoApproveLow: Bool
 
     private let scriptDir: String
     private var pollTimer: Timer?
+    private let autoApproveFlagPath: String
 
     init() {
         scriptDir = NSString("~/Development/nudge").expandingTildeInPath
+        autoApproveFlagPath = NSString("~/.nudge-autoapprove-disabled").expandingTildeInPath
+        autoApproveLow = !FileManager.default.fileExists(atPath: NSString("~/.nudge-autoapprove-disabled").expandingTildeInPath)
         if #available(macOS 13.0, *) {
             launchAtLogin = SMAppService.mainApp.status == .enabled
         }
@@ -33,6 +37,15 @@ final class DaemonController: ObservableObject {
     func restart() {
         runBackground("rm -f /tmp/claude-buddy-disabled && bash '\(scriptDir)/start-daemon.sh'")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { self.checkStatusSync() }
+    }
+
+    func toggleAutoApproveLow() {
+        if autoApproveLow {
+            FileManager.default.createFile(atPath: autoApproveFlagPath, contents: nil)
+        } else {
+            try? FileManager.default.removeItem(atPath: autoApproveFlagPath)
+        }
+        autoApproveLow.toggle()
     }
 
     func toggleLaunchAtLogin() {
