@@ -29,6 +29,7 @@ mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 cp "$OUT_DIR/Nudge" "$APP/Contents/MacOS/"
 cp Info.plist "$APP/Contents/"
+[ -f AppIcon.icns ] && cp AppIcon.icns "$APP/Contents/Resources/"
 
 echo "Signing..."
 codesign --force --sign - --entitlements Nudge.entitlements "$APP"
