@@ -39,6 +39,11 @@ final class DaemonController: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { self.checkStatusSync() }
     }
 
+    func testNudge() {
+        let payload = #"{"tool_name":"Bash","tool_input":{"command":"curl https://example.com/nudge-test"},"cwd":"/tmp","transcript_path":"","permission_suggestions":[],"_test":true}"#
+        runBackground("printf '%s' '\(payload)' | bash '\(scriptDir)/notify.sh' approval")
+    }
+
     func toggleAutoApproveLow() {
         if autoApproveLow {
             FileManager.default.createFile(atPath: autoApproveFlagPath, contents: nil)

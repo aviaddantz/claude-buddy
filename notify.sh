@@ -128,8 +128,17 @@ except Exception:
     print('approval')
 " 2>/dev/null || echo "approval")
 
-# Auto-approve low-risk operations without showing any pill (unless disabled via menu bar)
-if [ "$RISK" = "low" ] && [ ! -f "$HOME/.nudge-autoapprove-disabled" ]; then
+IS_TEST=$(echo "$HOOK_JSON" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print('true' if d.get('_test') else 'false')
+except Exception:
+    print('false')
+" 2>/dev/null || echo "false")
+
+# Auto-approve low-risk operations without showing any pill (unless disabled via menu bar or this is a test)
+if [ "$RISK" = "low" ] && [ ! -f "$HOME/.nudge-autoapprove-disabled" ] && [ "$IS_TEST" != "true" ]; then
     echo "[notify.sh $$] auto-approving low-risk tool=$TOOL_NAME" >> /tmp/claude-buddy.log
     rm -f "$PIPE"
     echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}'
