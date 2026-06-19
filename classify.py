@@ -120,11 +120,72 @@ LOW_TOOLS = {
 }
 
 HIGH_BASH_PATTERNS = [
-    r"\brm\b", r"\brmdir\b", r"--force\b", r"-f\b", r"--hard\b",
-    r"\bdd\b", r"\bmkfs\b", r"git push.*-f", r"git reset.*--hard",
+    r"\brm\b", r"\brmdir\b",
+    r"--force(?![a-z-])",              # --force but NOT --force-reinstall / --force-with-lease
+    r"--hard\b",
+    r"\bdd\b", r"\bmkfs\b",
+    r"git push.*-f\b", r"git reset.*--hard",
     r"chmod\s+[0-7]*7", r"sudo\b", r">\s*/dev/(?!null)",
     r"\btruncate\b", r"\bshred\b",
+    r"\bfind\b.*\s-delete\b",
 ]
+
+# curl flags that indicate data is being sent or a method override is in play
+CURL_WRITE_PATTERNS = [
+    r"\s-d\b", r"\s--data\b", r"\s--data-binary\b", r"\s--data-raw\b",
+    r"\s--data-urlencode\b", r"\s--upload-file\b",
+    r"-x\s+(post|put|delete|patch)",   # -X lowercased; --proxy would never match these words
+    r"--request\s+(post|put|delete|patch)",
+    r"\|\s*(bash|sh|zsh)\b",           # piped to a shell = executing downloaded content
+]
+
+
+def _is_readonly_curl(cmd):
+    """True if the command uses curl purely as a read (GET, no data/upload/method flags)."""
+    return bool(re.search(r"\bcurl\b", cmd)) and not any(
+        re.search(p, cmd) for p in CURL_WRITE_PATTERNS
+    )
+
+
+# Commands that are read-only when not combined with output redirection
+_SAFE_BASH_CMDS = frozenset([
+    "ls", "ll", "la", "cat", "head", "tail", "wc", "stat", "file",
+    "which", "whereis", "echo", "printf", "pwd", "date", "uname",
+    "id", "whoami", "env", "printenv", "hostname",
+    "grep", "egrep", "fgrep", "rg",
+    "find", "diff", "sort", "uniq", "tr", "cut", "column",
+    "jq", "yq", "open",
+])
+
+# Patterns that make an otherwise-safe bash command risky
+_SAFE_BASH_DANGEROUS = [
+    r"(?<![<2])>{1,2}\s*\S",           # output redirection (but not 2>&1)
+    r"\btee\b",                         # tee writes to files
+    r"\|\s*(bash|sh|zsh|python\d*|node|ruby|perl)\b",  # pipe to interpreter
+    r"\bfind\b.*-(exec|delete)\b",      # find with exec or delete
+    r"\bsed\b.*\s-[^\s]*i\b",          # sed -i (in-place edit)
+    r"\bxargs\b",                       # xargs could run anything
+]
+
+
+def _is_safe_bash(cmd):
+    """True if bash command is clearly read-only (no curl — handled separately)."""
+    if re.search(r"\bcurl\b", cmd):
+        return False
+    if any(re.search(p, cmd) for p in _SAFE_BASH_DANGEROUS):
+        return False
+    for seg in re.split(r"\s*(?:\|\|?|&&|;)\s*", cmd):
+        words = seg.strip().split()
+        if not words:
+            continue
+        first = words[0].lstrip("\\")
+        # Skip leading env-var assignments like FOO=bar cmd
+        while first and re.match(r"^[a-z_][a-z0-9_]*=", first):
+            words = words[1:]
+            first = words[0].lstrip("\\") if words else ""
+        if first and first not in _SAFE_BASH_CMDS:
+            return False
+    return True
 
 
 def get_risk(tool_lower, inp_dict):
@@ -134,6 +195,8 @@ def get_risk(tool_lower, inp_dict):
         cmd = str(inp_dict.get("command", "")).lower()
         if any(re.search(p, cmd) for p in HIGH_BASH_PATTERNS):
             return "high"
+        if _is_readonly_curl(cmd) or _is_safe_bash(cmd):
+            return "low"
     if tool_lower.startswith("mcp__"):
         # MCP reads are low risk
         action = tool_lower.split("__")[-1]
