@@ -43,6 +43,9 @@ struct NudgeApp: App {
             Button("Restart") { daemon.restart() }
                 .disabled(!daemon.isRunning)
 
+            Button("Test Nudge") { daemon.testNudge() }
+                .disabled(!daemon.isRunning)
+
             Divider()
 
             Toggle("Auto-approve safe operations", isOn: Binding(
