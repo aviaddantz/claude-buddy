@@ -142,9 +142,10 @@ mkfifo "$PIPE"
 
 # Build and send JSON payload to buddy daemon (includes ITERM_SESSION_ID for correct terminal focus)
 ITERM_SESSION="${ITERM_SESSION_ID:-}"
+TERM_PROG="${TERM_PROGRAM:-}"
 PAYLOAD=$(python3 -c "
 import json, sys
-tool_input = json.loads(sys.argv[10]) if sys.argv[10] else {}
+tool_input = json.loads(sys.argv[11]) if sys.argv[11] else {}
 # Strip large fields (e.g. Write tool 'content') — only need command/path for display
 if isinstance(tool_input, dict):
     tool_input = {k: v for k, v in tool_input.items() if k != 'content'}
@@ -159,9 +160,10 @@ print(json.dumps({
     'mode': sys.argv[7],
     'iterm_session': sys.argv[8],
     'notify_pid': int(sys.argv[9]),
+    'term_program': sys.argv[10],
     'tool_input': tool_input,
 }))
-" "$TOOL_NAME" "$INTENT" "$RISK" "$PIPE" "$CWD" "$SUGGESTIONS" "$MODE" "$ITERM_SESSION" "$$" "$TOOL_INPUT" 2>/dev/null)
+" "$TOOL_NAME" "$INTENT" "$RISK" "$PIPE" "$CWD" "$SUGGESTIONS" "$MODE" "$ITERM_SESSION" "$$" "$TERM_PROG" "$TOOL_INPUT" 2>/dev/null)
 
 BUDDY_CONNECTED=false
 python3 -c "
