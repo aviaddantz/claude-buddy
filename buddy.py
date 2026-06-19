@@ -854,7 +854,7 @@ end tell
         def _pin_to_all_spaces(self):
             try:
                 from AppKit import (
-                    NSApp,
+                    NSApp, NSWorkspace,
                     NSWindowCollectionBehaviorCanJoinAllSpaces,
                     NSWindowCollectionBehaviorMoveToActiveSpace,
                     NSWindowCollectionBehaviorFullScreenAuxiliary,
@@ -869,7 +869,23 @@ end tell
                     behavior |= NSWindowCollectionBehaviorStationary
                     behavior |= NSWindowCollectionBehaviorIgnoresCycle
                     win.setCollectionBehavior_(behavior)
-                    win.setLevel_(25)  # NSStatusWindowLevel — above normal windows but not full-screen apps
+                    win.setLevel_(25)
+
+                # Re-front on every space switch so the chip follows across full-screen spaces.
+                # Registered once; the block captures self weakly via the visible check.
+                if not getattr(self, '_space_observer_registered', False):
+                    self._space_observer_registered = True
+                    def _on_space_change(_notification):
+                        if self.isVisible():
+                            try:
+                                for win in NSApp.windows():
+                                    win.orderFrontRegardless()
+                            except Exception:
+                                pass
+                    NSWorkspace.sharedWorkspace().notificationCenter() \
+                        .addObserverForName_object_queue_usingBlock_(
+                            "NSWorkspaceActiveSpaceDidChangeNotification",
+                            None, None, _on_space_change)
             except Exception as e:
                 print(f"[buddy] _pin_to_all_spaces failed: {e}", file=sys.stderr)
 
