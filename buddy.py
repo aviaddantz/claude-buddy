@@ -238,7 +238,7 @@ def run_daemon():
         approved      = pyqtSignal(str)        # pipe path
         denied        = pyqtSignal(str)        # pipe path
         always        = pyqtSignal(str, str)   # pipe path, destination ("session"/"project")
-        go_session    = pyqtSignal(str)        # iterm_session value
+        go_session    = pyqtSignal(str, str)   # iterm_session, term_program
         activated     = pyqtSignal(int)        # index within parent queue
         expand_changed = pyqtSignal(bool)      # True=expanded, False=collapsed
 
@@ -421,11 +421,27 @@ def run_daemon():
                     "background: transparent; border: none; color: #555;"
                     " padding: 4px; font-size: 10px;"
                 )
-            go_btn = QPushButton("Go to session")
+            _TERM_LABELS = {
+                "iterm.app":      "Go to session",
+                "apple_terminal": "Open Terminal",
+                "warpterminal":   "Open Warp",
+                "hyper":          "Open Hyper",
+                "ghostty":        "Open Ghostty",
+                "vscode":         "Open VS Code",
+                "cursor":         "Open Cursor",
+            }
+            if req.get("iterm_session"):
+                _go_label = "Go to session"
+            else:
+                _go_label = _TERM_LABELS.get(req.get("term_program", "").lower(), "Open Claude")
+            go_btn = QPushButton(_go_label)
             go_btn.setStyleSheet(go_style)
             go_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             go_btn.clicked.connect(
-                lambda: self.go_session.emit(req.get("iterm_session", ""))
+                lambda: self.go_session.emit(
+                    req.get("iterm_session", ""),
+                    req.get("term_program", ""),
+                )
             )
             exp_layout.addWidget(go_btn)
 
@@ -727,8 +743,8 @@ def run_daemon():
             _write_decision("always_allow", pipe)
             self._remove_by_pipe(pipe)
 
-        def _on_pill_go_session(self, iterm_session: str):
-            self._focus_terminal_with_session(iterm_session)
+        def _on_pill_go_session(self, iterm_session: str, term_program: str):
+            self._focus_terminal_with_session(iterm_session, term_program)
 
         def _on_pill_activated(self, index: int):
             self._current_index = index
@@ -776,10 +792,10 @@ def run_daemon():
 
         # ── Terminal focus ─────────────────────────────────────────────────────
 
-        def _focus_terminal_with_session(self, iterm_session: str):
-            claude_uuid = iterm_session
-            if claude_uuid:
-                claude_uuid = claude_uuid.split(":")[1] if ":" in claude_uuid else claude_uuid
+        def _focus_terminal_with_session(self, iterm_session: str, term_program: str = ""):
+            # 1. iTerm2: use exact session UUID for precise tab targeting
+            if iterm_session:
+                claude_uuid = iterm_session.split(":")[1] if ":" in iterm_session else iterm_session
                 script = f'''
 tell application "iTerm2"
   activate
@@ -798,12 +814,38 @@ end tell
 '''
                 subprocess.run(["osascript", "-e", script], capture_output=True)
                 return
-            for app in ["Terminal", "Warp", "Alacritty", "Hyper", "iTerm2"]:
-                result = subprocess.run(
-                    ["osascript", "-e", f'tell application "System Events" to return (name of processes) contains "{app}"'],
-                    capture_output=True, text=True
+
+            # 2. Known terminal via TERM_PROGRAM env var
+            TERM_TO_APP = {
+                "iterm.app":      "iTerm2",
+                "apple_terminal": "Terminal",
+                "warpterminal":   "Warp",
+                "hyper":          "Hyper",
+                "ghostty":        "Ghostty",
+                "vscode":         "Code",
+                "cursor":         "Cursor",
+            }
+            if term_program:
+                app = TERM_TO_APP.get(term_program.lower())
+                if app:
+                    subprocess.run(["osascript", "-e", f'tell application "{app}" to activate'], capture_output=True)
+                    return
+
+            # 3. No terminal context — likely Claude Desktop
+            def _is_running(app_name):
+                r = subprocess.run(
+                    ["osascript", "-e", f'tell application "System Events" to return (name of processes) contains "{app_name}"'],
+                    capture_output=True, text=True,
                 )
-                if result.stdout.strip() == "true":
+                return r.stdout.strip() == "true"
+
+            if _is_running("Claude"):
+                subprocess.run(["osascript", "-e", 'tell application "Claude" to activate'], capture_output=True)
+                return
+
+            # 4. Last resort: scan for any running terminal
+            for app in ["iTerm2", "Terminal", "Warp", "Ghostty", "Alacritty", "Hyper"]:
+                if _is_running(app):
                     subprocess.run(["osascript", "-e", f'tell application "{app}" to activate'], capture_output=True)
                     return
 
