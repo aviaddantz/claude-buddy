@@ -569,6 +569,7 @@ def run_daemon():
             self._stale_timer.start()
 
             self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.winId()  # Force NSWindow creation now so the pin timer finds it
             QTimer.singleShot(100, self._pin_to_all_spaces)
 
         # ── Layout helpers ─────────────────────────────────────────────────────
@@ -712,6 +713,7 @@ def run_daemon():
                 self._position_window()
                 self.show()
                 self._pin_to_all_spaces()
+                QTimer.singleShot(100, self._pin_to_all_spaces)  # re-pin after AppKit settles
                 try:
                     from AppKit import NSApp
                     for win in NSApp.windows():
@@ -853,6 +855,7 @@ end tell
 
         def _pin_to_all_spaces(self):
             try:
+                import objc
                 from AppKit import (
                     NSApp, NSWorkspace,
                     NSWindowCollectionBehaviorCanJoinAllSpaces,
@@ -861,7 +864,25 @@ end tell
                     NSWindowCollectionBehaviorStationary,
                     NSWindowCollectionBehaviorIgnoresCycle,
                 )
-                for win in NSApp.windows():
+
+                # Prefer getting NSWindow directly from this widget's native handle.
+                # NSApp.windows() is unreliable for NSApplicationActivationPolicyAccessory
+                # apps and may be empty if called before the window is first shown.
+                windows_to_pin = []
+                try:
+                    ns_view = objc.objc_id(int(self.winId()))
+                    ns_win = ns_view.window()
+                    if ns_win is not None:
+                        windows_to_pin = [ns_win]
+                except Exception:
+                    pass
+
+                if not windows_to_pin:
+                    windows_to_pin = list(NSApp.windows())
+
+                print(f"[buddy] _pin_to_all_spaces: {len(windows_to_pin)} windows", file=sys.stderr)
+
+                for win in windows_to_pin:
                     behavior = win.collectionBehavior()
                     behavior &= ~NSWindowCollectionBehaviorMoveToActiveSpace
                     behavior |= NSWindowCollectionBehaviorCanJoinAllSpaces
@@ -871,8 +892,6 @@ end tell
                     win.setCollectionBehavior_(behavior)
                     win.setLevel_(25)
 
-                # Re-front on every space switch so the chip follows across full-screen spaces.
-                # Registered once; the block captures self weakly via the visible check.
                 if not getattr(self, '_space_observer_registered', False):
                     self._space_observer_registered = True
                     def _on_space_change(_notification):
@@ -882,6 +901,7 @@ end tell
                                     win.orderFrontRegardless()
                             except Exception:
                                 pass
+                            self._pin_to_all_spaces()  # re-apply in case behavior was lost
                     NSWorkspace.sharedWorkspace().notificationCenter() \
                         .addObserverForName_object_queue_usingBlock_(
                             "NSWorkspaceActiveSpaceDidChangeNotification",
