@@ -5,15 +5,19 @@ final class DaemonController: ObservableObject {
     @Published var isRunning = false
     @Published var launchAtLogin = false
     @Published var autoApproveLow: Bool
+    @Published var idleVisible: Bool
 
     private let scriptDir: String
     private var pollTimer: Timer?
     private let autoApproveFlagPath: String
+    private let idleVisibleFlagPath: String
 
     init() {
         scriptDir = NSString("~/Development/nudge").expandingTildeInPath
         autoApproveFlagPath = NSString("~/.nudge-autoapprove-disabled").expandingTildeInPath
         autoApproveLow = !FileManager.default.fileExists(atPath: NSString("~/.nudge-autoapprove-disabled").expandingTildeInPath)
+        idleVisibleFlagPath = NSString("~/.nudge-idle-visible").expandingTildeInPath
+        idleVisible = FileManager.default.fileExists(atPath: NSString("~/.nudge-idle-visible").expandingTildeInPath)
         if #available(macOS 13.0, *) {
             launchAtLogin = SMAppService.mainApp.status == .enabled
         }
@@ -51,6 +55,17 @@ final class DaemonController: ObservableObject {
             try? FileManager.default.removeItem(atPath: autoApproveFlagPath)
         }
         autoApproveLow.toggle()
+    }
+
+    func toggleIdleVisible() {
+        if idleVisible {
+            try? FileManager.default.removeItem(atPath: idleVisibleFlagPath)
+            runBackground("bash '\(scriptDir)/notify.sh' idle_off")
+        } else {
+            FileManager.default.createFile(atPath: idleVisibleFlagPath, contents: nil)
+            runBackground("bash '\(scriptDir)/notify.sh' idle_on")
+        }
+        idleVisible.toggle()
     }
 
     func toggleLaunchAtLogin() {
