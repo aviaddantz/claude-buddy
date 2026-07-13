@@ -30,7 +30,14 @@ final class DaemonController: ObservableObject {
 
     func startDaemon() {
         runBackground("rm -f /tmp/claude-buddy-disabled && bash '\(scriptDir)/start-daemon.sh'")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { self.checkStatusSync() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.checkStatusSync()
+            // If idle mode is on, send session_start so the sprite appears immediately
+            // (the daemon restarted with zero session count — existing sessions don't re-fire their hook)
+            if self.idleVisible {
+                self.runBackground("bash '\(self.scriptDir)/notify.sh' session_start")
+            }
+        }
     }
 
     func stopDaemon() {
