@@ -2,14 +2,49 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOCKET_PATH="/tmp/claude-buddy.sock"
 MODE="${1:-approval}"
 
-if [ "$MODE" != "approval" ]; then
-    python3 "$SCRIPT_DIR/buddy.py" hide 2>/dev/null || true
+_send_socket_cmd() {
+    python3 -c "
+import socket, json, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(2)
+try:
+    s.connect(sys.argv[1])
+    s.sendall(sys.argv[2].encode())
+    s.close()
+except Exception:
+    pass
+" "$SOCKET_PATH" "$1" 2>/dev/null || true
+}
+
+if [ "$MODE" = "session_start" ]; then
+    _send_socket_cmd '{"cmd":"session_start"}'
     exit 0
 fi
 
-SOCKET_PATH="/tmp/claude-buddy.sock"
+if [ "$MODE" = "session_end" ] || [ "$MODE" = "done" ]; then
+    _send_socket_cmd '{"cmd":"session_end"}'
+    exit 0
+fi
+
+if [ "$MODE" = "idle_on" ]; then
+    touch "$HOME/.nudge-idle-visible"
+    _send_socket_cmd '{"cmd":"set_idle_visible","value":true}'
+    exit 0
+fi
+
+if [ "$MODE" = "idle_off" ]; then
+    rm -f "$HOME/.nudge-idle-visible"
+    _send_socket_cmd '{"cmd":"set_idle_visible","value":false}'
+    exit 0
+fi
+
+if [ "$MODE" != "approval" ]; then
+    exit 0
+fi
+
 PIPE="/tmp/claude-buddy-decision-$$"
 echo "[notify.sh $$] started mode=$MODE" >> /tmp/claude-buddy.log
 # On exit: always tell daemon to remove this request from queue (idempotent — no-op if already resolved via widget)
