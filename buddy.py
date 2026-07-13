@@ -518,6 +518,7 @@ def run_daemon():
             self._current_index = 0
             self._base_x = 0
             self._base_y = 80
+            self._drag_offset = None
 
             # --- Sprite ---
             self.sprite = SpriteWidget(self)
@@ -568,7 +569,7 @@ def run_daemon():
             self._stale_timer.timeout.connect(self._cleanup_stale_requests)
             self._stale_timer.start()
 
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
             self.winId()  # Force NSWindow creation now so the pin timer finds it
             QTimer.singleShot(100, self._pin_to_all_spaces)
 
@@ -692,18 +693,67 @@ def run_daemon():
             self._current_index = min(self._current_index, len(self._requests) - 1)
             self._rebuild_sessions()
 
+        POSITION_FILE = os.path.expanduser("~/.nudge-position")
+
+        def _load_saved_position(self):
+            try:
+                with open(os.path.expanduser("~/.nudge-position")) as f:
+                    data = json.load(f)
+                    x, y = data.get("x"), data.get("y")
+                    if isinstance(x, int) and isinstance(y, int):
+                        return x, y
+            except Exception:
+                pass
+            return None, None
+
+        def _save_position(self):
+            try:
+                with open(os.path.expanduser("~/.nudge-position"), "w") as f:
+                    json.dump({"x": self._base_x, "y": self._base_y}, f)
+            except Exception:
+                pass
+
         def _position_window(self):
-            screen = QApplication.primaryScreen().geometry()
             self._update_window_size()
-            self._base_y = 80
-            self._base_x = screen.width() - self.width() - 20
+            saved_x, saved_y = self._load_saved_position()
+            if saved_x is not None:
+                self._base_x = saved_x
+                self._base_y = saved_y
+            else:
+                screen = QApplication.primaryScreen().geometry()
+                self._base_y = 80
+                self._base_x = screen.width() - self.width() - 20
             self.move(self._base_x, self._base_y)
 
         def _reanchor(self):
-            """Re-apply top-right position after height changes."""
-            screen = QApplication.primaryScreen().geometry()
-            self._base_x = screen.width() - self.width() - 20
+            # Keep user's x; only re-apply position after height changes
             self.move(self._base_x, self._base_y)
+
+        def mousePressEvent(self, event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                if event.position().y() < self._sprite_h:
+                    self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                    event.accept()
+                    return
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event):
+            if self._drag_offset is not None and event.buttons() == Qt.MouseButton.LeftButton:
+                new_pos = event.globalPosition().toPoint() - self._drag_offset
+                self._base_x = new_pos.x()
+                self._base_y = new_pos.y()
+                self.move(new_pos)
+                event.accept()
+                return
+            super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event):
+            if self._drag_offset is not None:
+                self._drag_offset = None
+                self._save_position()
+                event.accept()
+                return
+            super().mouseReleaseEvent(event)
 
         def do_show(self, payload: dict):
             was_empty = len(self._requests) == 0
