@@ -45,6 +45,11 @@ final class DaemonController: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.checkStatusSync() }
     }
 
+    func quit() {
+        // Run synchronously so the daemon is dead before NSApp exits
+        _ = shell("bash '\(scriptDir)/stop-daemon.sh'")
+    }
+
     func restart() {
         runBackground("rm -f /tmp/claude-buddy-disabled && bash '\(scriptDir)/start-daemon.sh'")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { self.checkStatusSync() }

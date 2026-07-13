@@ -66,7 +66,7 @@ struct NudgeApp: App {
             Divider()
 
             Button("Quit Nudge") {
-                daemon.stopDaemon()
+                daemon.quit()
                 NSApp.terminate(nil)
             }
         } label: {
