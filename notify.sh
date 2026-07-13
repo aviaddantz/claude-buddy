@@ -25,7 +25,18 @@ if [ "$MODE" = "session_start" ]; then
 fi
 
 if [ "$MODE" = "session_end" ] || [ "$MODE" = "done" ]; then
-    _send_socket_cmd '{"cmd":"session_end"}'
+    _SESSION_ID_END=""
+    if [ ! -t 0 ]; then
+        _SESSION_ID_END=$(cat | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+    fi
+    _send_socket_cmd "{\"cmd\":\"session_end\",\"session_id\":\"${_SESSION_ID_END}\"}"
     exit 0
 fi
 
@@ -48,7 +59,7 @@ fi
 PIPE="/tmp/claude-buddy-decision-$$"
 echo "[notify.sh $$] started mode=$MODE" >> /tmp/claude-buddy.log
 # On exit: always tell daemon to remove this request from queue (idempotent — no-op if already resolved via widget)
-trap 'echo "[notify.sh $$] SIGTERM received" >> /tmp/claude-buddy.log' TERM
+trap 'echo "[notify.sh $$] SIGTERM received" >> /tmp/claude-buddy.log; exit 1' TERM
 trap '
   _PIPE="$PIPE"
   echo "[notify.sh $$] EXIT trap fired, removing pipe $_PIPE" >> /tmp/claude-buddy.log
@@ -106,6 +117,15 @@ try:
 except Exception:
     print('\"\"')
 " 2>/dev/null || echo '""')
+
+SESSION_ID=$(echo "$HOOK_JSON" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
 
 CWD=$(echo "$HOOK_JSON" | python3 -c "
 import sys, json, os
@@ -209,8 +229,10 @@ print(json.dumps({
     'notify_pid': int(sys.argv[9]),
     'term_program': sys.argv[10],
     'tool_input': tool_input,
+    'transcript_path': sys.argv[12],
+    'session_id': sys.argv[13],
 }))
-" "$TOOL_NAME" "$INTENT" "$RISK" "$PIPE" "$CWD" "$SUGGESTIONS" "$MODE" "$ITERM_SESSION" "$$" "$TERM_PROG" "$TOOL_INPUT" 2>/dev/null)
+" "$TOOL_NAME" "$INTENT" "$RISK" "$PIPE" "$CWD" "$SUGGESTIONS" "$MODE" "$ITERM_SESSION" "$$" "$TERM_PROG" "$TOOL_INPUT" "$TRANSCRIPT" "$SESSION_ID" 2>/dev/null)
 
 echo "[notify.sh $$] sending to daemon buddy_connected=?" >> /tmp/claude-buddy.log
 BUDDY_CONNECTED=false

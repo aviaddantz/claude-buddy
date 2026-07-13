@@ -13,6 +13,8 @@ import os
 import json
 import socket
 import subprocess
+import signal
+import time
 
 SOCKET_PATH = "/tmp/claude-buddy.sock"
 
@@ -64,7 +66,7 @@ def run_daemon():
         hide_signal = pyqtSignal()
         cancel_signal = pyqtSignal(str)  # carries pipe path
         session_start_signal = pyqtSignal()
-        session_end_signal = pyqtSignal()
+        session_end_signal = pyqtSignal(str)  # carries session_id
         set_idle_visible_signal = pyqtSignal(bool)
 
         def run(self):
@@ -99,7 +101,7 @@ def run_daemon():
                     elif cmd == "session_start":
                         self.session_start_signal.emit()
                     elif cmd == "session_end":
-                        self.session_end_signal.emit()
+                        self.session_end_signal.emit(msg.get("session_id", ""))
                     elif cmd == "set_idle_visible":
                         self.set_idle_visible_signal.emit(bool(msg.get("value", False)))
                 except Exception:
@@ -693,8 +695,30 @@ def run_daemon():
                     )
                     if result.stdout.strip().startswith("Z"):
                         stale.append(i)
+                        continue
                 except Exception:
                     pass
+
+                # Transcript-mtime stale: Claude Code ran the tool without waiting for
+                # the hook (user responded natively). When the tool result is written,
+                # the transcript mtime advances past what we recorded at queue time.
+                transcript_path = req.get("transcript_path", "")
+                queued_mtime = req.get("_transcript_mtime", 0.0)
+                queued_at = req.get("_queued_at", 0.0)
+                if (transcript_path and queued_mtime > 0 and
+                        time.time() - queued_at > 2.0 and
+                        os.path.exists(transcript_path)):
+                    try:
+                        if os.stat(transcript_path).st_mtime > queued_mtime:
+                            stale.append(i)
+                            if pid:
+                                try:
+                                    os.kill(pid, signal.SIGTERM)
+                                except OSError:
+                                    pass
+                            continue
+                    except OSError:
+                        pass
 
             if not stale:
                 return
@@ -772,6 +796,16 @@ def run_daemon():
             super().mouseReleaseEvent(event)
 
         def do_show(self, payload: dict):
+            # Stamp when the request was queued and record current transcript mtime.
+            # The stale checker uses this to detect when Claude Code ran the tool
+            # without waiting for the hook (i.e. user responded natively).
+            payload["_queued_at"] = time.time()
+            transcript_path = payload.get("transcript_path", "")
+            try:
+                payload["_transcript_mtime"] = os.stat(transcript_path).st_mtime if transcript_path else 0.0
+            except OSError:
+                payload["_transcript_mtime"] = 0.0
+
             was_empty = len(self._requests) == 0
             self._requests.append(payload)
             if was_empty:
@@ -805,10 +839,28 @@ def run_daemon():
             if self._idle_visible and not self._requests and not self.isVisible():
                 self._show_idle()
 
-        def on_session_end(self):
+        def on_session_end(self, session_id: str):
             self._session_count = max(0, self._session_count - 1)
-            if self._session_count == 0 and not self._requests:
-                self.do_hide()
+            if session_id:
+                to_kill = [req for req in self._requests
+                           if req.get("session_id", "") == session_id]
+                self._requests = [req for req in self._requests
+                                  if req.get("session_id", "") != session_id]
+                for req in to_kill:
+                    pid = req.get("notify_pid", 0)
+                    if pid:
+                        try:
+                            os.kill(pid, signal.SIGTERM)
+                        except OSError:
+                            pass
+            if not self._requests:
+                if self._idle_visible and self._session_count > 0:
+                    self._show_idle()
+                else:
+                    self.do_hide()
+            else:
+                self._current_index = min(self._current_index, len(self._requests) - 1)
+                self._rebuild_sessions()
 
         def on_set_idle_visible(self, value: bool):
             self._idle_visible = value
@@ -1039,7 +1091,7 @@ end tell
     server_thread.hide_signal.connect(window.do_hide)
     server_thread.cancel_signal.connect(window._on_cancel)
     server_thread.session_start_signal.connect(window.on_session_start)
-    server_thread.session_end_signal.connect(window.on_session_end)
+    server_thread.session_end_signal.connect(window.on_session_end)  # str session_id
     server_thread.set_idle_visible_signal.connect(window.on_set_idle_visible)
     server_thread.daemon = True
     server_thread.start()
