@@ -893,7 +893,10 @@ def run_daemon():
                 if req.get("pipe", "") == pipe_path:
                     self._requests.pop(i)
                     if not self._requests:
-                        self.do_hide()
+                        if self._idle_visible and self._session_count > 0:
+                            self._show_idle()
+                        else:
+                            self.do_hide()
                         return
                     self._current_index = min(self._current_index, len(self._requests) - 1)
                     self._rebuild_sessions()
