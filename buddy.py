@@ -63,6 +63,9 @@ def run_daemon():
         show_signal = pyqtSignal(dict)   # carries payload dict
         hide_signal = pyqtSignal()
         cancel_signal = pyqtSignal(str)  # carries pipe path
+        session_start_signal = pyqtSignal()
+        session_end_signal = pyqtSignal()
+        set_idle_visible_signal = pyqtSignal(bool)
 
         def run(self):
             if os.path.exists(SOCKET_PATH):
@@ -93,6 +96,12 @@ def run_daemon():
                         self.hide_signal.emit()
                     elif cmd == "cancel":
                         self.cancel_signal.emit(msg.get("pipe", ""))
+                    elif cmd == "session_start":
+                        self.session_start_signal.emit()
+                    elif cmd == "session_end":
+                        self.session_end_signal.emit()
+                    elif cmd == "set_idle_visible":
+                        self.set_idle_visible_signal.emit(bool(msg.get("value", False)))
                 except Exception:
                     pass
 
@@ -519,6 +528,8 @@ def run_daemon():
             self._base_x = 0
             self._base_y = 80
             self._drag_offset = None
+            self._session_count = 0
+            self._idle_visible = os.path.exists(os.path.expanduser("~/.nudge-idle-visible"))
 
             # --- Sprite ---
             self.sprite = SpriteWidget(self)
@@ -688,7 +699,10 @@ def run_daemon():
             for i in reversed(stale):
                 self._requests.pop(i)
             if not self._requests:
-                self.do_hide()
+                if self._idle_visible and self._session_count > 0:
+                    self._show_idle()
+                else:
+                    self.do_hide()
                 return
             self._current_index = min(self._current_index, len(self._requests) - 1)
             self._rebuild_sessions()
@@ -760,10 +774,12 @@ def run_daemon():
             self._requests.append(payload)
             if was_empty:
                 self._current_index = 0
-                self._position_window()
-                self.show()
-                self._pin_to_all_spaces()
-                QTimer.singleShot(100, self._pin_to_all_spaces)  # re-pin after AppKit settles
+                self._container.show()
+                if not self.isVisible():
+                    self._position_window()
+                    self.show()
+                    self._pin_to_all_spaces()
+                    QTimer.singleShot(100, self._pin_to_all_spaces)  # re-pin after AppKit settles
                 try:
                     from AppKit import NSApp
                     for win in NSApp.windows():
@@ -780,6 +796,44 @@ def run_daemon():
             self._requests = []
             self._current_index = 0
             self.hide()
+
+        def on_session_start(self):
+            self._session_count += 1
+            if self._idle_visible and not self._requests and not self.isVisible():
+                self._show_idle()
+
+        def on_session_end(self):
+            self._session_count = max(0, self._session_count - 1)
+            if self._session_count == 0 and not self._requests:
+                self.do_hide()
+
+        def on_set_idle_visible(self, value: bool):
+            self._idle_visible = value
+            if value and self._session_count > 0 and not self._requests and not self.isVisible():
+                self._show_idle()
+            elif not value and self.isVisible() and not self._requests:
+                self.do_hide()
+
+        def _show_idle(self):
+            """Show widget in idle state: sprite only, no pills."""
+            self._container.hide()
+            self._badge.hide()
+            if not self.isVisible():
+                saved_x, saved_y = self._load_saved_position()
+                if saved_x is not None:
+                    self._base_x = saved_x
+                    self._base_y = saved_y
+                else:
+                    screen = QApplication.primaryScreen().geometry()
+                    self._base_y = 80
+                    self._base_x = screen.width() - self.width() - 20
+                self.setFixedHeight(self._sprite_h + 10)
+                self.move(self._base_x, self._base_y)
+                self.show()
+                self._pin_to_all_spaces()
+                QTimer.singleShot(100, self._pin_to_all_spaces)
+                self._bob_tick = 0
+                self._bob_timer.start()
 
         # ── Pill signal handlers ───────────────────────────────────────────────
 
@@ -823,7 +877,10 @@ def run_daemon():
                 if req.get("pipe", "") == pipe:
                     self._requests.pop(i)
                     if not self._requests:
-                        self.do_hide()
+                        if self._idle_visible and self._session_count > 0:
+                            self._show_idle()
+                        else:
+                            self.do_hide()
                         return
                     self._current_index = min(self._current_index, len(self._requests) - 1)
                     self._rebuild_sessions()
@@ -971,6 +1028,9 @@ end tell
     server_thread.show_signal.connect(window.do_show)
     server_thread.hide_signal.connect(window.do_hide)
     server_thread.cancel_signal.connect(window._on_cancel)
+    server_thread.session_start_signal.connect(window.on_session_start)
+    server_thread.session_end_signal.connect(window.on_session_end)
+    server_thread.set_idle_visible_signal.connect(window.on_set_idle_visible)
     server_thread.daemon = True
     server_thread.start()
 
