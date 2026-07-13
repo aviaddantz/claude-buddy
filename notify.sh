@@ -13,6 +13,7 @@ SOCKET_PATH="/tmp/claude-buddy.sock"
 PIPE="/tmp/claude-buddy-decision-$$"
 echo "[notify.sh $$] started mode=$MODE" >> /tmp/claude-buddy.log
 # On exit: always tell daemon to remove this request from queue (idempotent — no-op if already resolved via widget)
+trap 'echo "[notify.sh $$] SIGTERM received" >> /tmp/claude-buddy.log' TERM
 trap '
   _PIPE="$PIPE"
   echo "[notify.sh $$] EXIT trap fired, removing pipe $_PIPE" >> /tmp/claude-buddy.log
@@ -137,6 +138,8 @@ except Exception:
     print('false')
 " 2>/dev/null || echo "false")
 
+echo "[notify.sh $$] classified: risk=$RISK intent=$INTENT mode=$MODE is_test=$IS_TEST" >> /tmp/claude-buddy.log
+
 # Auto-approve low-risk operations without showing any pill (unless disabled via menu bar or this is a test)
 if [ "$RISK" = "low" ] && [ ! -f "$HOME/.nudge-autoapprove-disabled" ] && [ "$IS_TEST" != "true" ]; then
     echo "[notify.sh $$] auto-approving low-risk tool=$TOOL_NAME" >> /tmp/claude-buddy.log
@@ -174,6 +177,7 @@ print(json.dumps({
 }))
 " "$TOOL_NAME" "$INTENT" "$RISK" "$PIPE" "$CWD" "$SUGGESTIONS" "$MODE" "$ITERM_SESSION" "$$" "$TERM_PROG" "$TOOL_INPUT" 2>/dev/null)
 
+echo "[notify.sh $$] sending to daemon buddy_connected=?" >> /tmp/claude-buddy.log
 BUDDY_CONNECTED=false
 python3 -c "
 import socket, sys
@@ -183,8 +187,9 @@ s.connect('/tmp/claude-buddy.sock')
 s.sendall(sys.argv[1].encode())
 s.close()
 " "$PAYLOAD" 2>/dev/null && BUDDY_CONNECTED=true
+echo "[notify.sh $$] buddy_connected=$BUDDY_CONNECTED" >> /tmp/claude-buddy.log
 
-if [ "$BUDDY_CONNECTED" = false ]; then
+if [ "$BUDDY_CONNECTED" = false ] && [ ! -f /tmp/claude-buddy-disabled ]; then
     echo "[notify.sh $$] daemon not reachable, auto-starting..." >> /tmp/claude-buddy.log
     bash "$SCRIPT_DIR/start-daemon.sh" 2>/dev/null
     sleep 1.5
@@ -205,14 +210,9 @@ if [ "$BUDDY_CONNECTED" = false ]; then
     exit 0
 fi
 
-# Snapshot transcript mtime so we can detect when Claude Code moves on
-TRANSCRIPT_MTIME=""
-if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-    TRANSCRIPT_MTIME=$(stat -f "%m" "$TRANSCRIPT" 2>/dev/null || echo "")
-fi
-
-# Wait for user decision — poll with short timeout so we can detect if Claude Code
-# moved on via transcript changed, parent killed, or reparented
+# Wait for user decision — poll with short timeout so we can detect if
+# parent was killed or reparented
+echo "[notify.sh $$] entering wait loop ppid=$PPID" >> /tmp/claude-buddy.log
 HOOK_PPID="$PPID"
 DECISION=""
 while [ -z "$DECISION" ]; do
@@ -220,20 +220,18 @@ while [ -z "$DECISION" ]; do
     if [ -z "$DECISION" ]; then
         # ESC / abort: parent shell killed by Claude Code
         if ! kill -0 "$HOOK_PPID" 2>/dev/null; then
+            echo "[notify.sh $$] breaking: ppid=$HOOK_PPID dead" >> /tmp/claude-buddy.log
             break
         fi
         # Reparented: parent was killed, we got adopted by launchd/init
         CURRENT_PPID=$(ps -p $$ -o ppid= 2>/dev/null | tr -d ' ')
         if [ -n "$CURRENT_PPID" ] && [ "$CURRENT_PPID" != "$HOOK_PPID" ]; then
+            echo "[notify.sh $$] breaking: reparented from $HOOK_PPID to $CURRENT_PPID" >> /tmp/claude-buddy.log
             break
         fi
-        # Check transcript mtime: Claude Code wrote new content (terminal answered)
-        if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] && [ -n "$TRANSCRIPT_MTIME" ]; then
-            CURRENT_MTIME=$(stat -f "%m" "$TRANSCRIPT" 2>/dev/null || echo "")
-            if [ -n "$CURRENT_MTIME" ] && [ "$CURRENT_MTIME" != "$TRANSCRIPT_MTIME" ]; then
-                DECISION="approve"
-            fi
-        fi
+        # Note: transcript mtime check removed -- it false-triggered constantly because
+        # Claude Code writes to the transcript during normal execution, causing
+        # immediate auto-approve before the user could interact with the widget.
     fi
 done
 rm -f "$PIPE"
