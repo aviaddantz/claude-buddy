@@ -119,6 +119,7 @@ def run_daemon():
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self._rope_angle = 0.0
+            self.show_rope = True
 
         def set_rope_angle(self, angle: float):
             self._rope_angle = angle
@@ -212,7 +213,8 @@ def run_daemon():
             painter.drawPath(left_eye)
             painter.drawPath(right_eye)
 
-            self._draw_rope(painter, unit)
+            if self.show_rope:
+                self._draw_rope(painter, unit)
 
             painter.end()
 
@@ -774,6 +776,7 @@ def run_daemon():
             self._requests.append(payload)
             if was_empty:
                 self._current_index = 0
+                self.sprite.show_rope = True
                 self._container.show()
                 if not self.isVisible():
                     self._position_window()
@@ -815,9 +818,11 @@ def run_daemon():
                 self.do_hide()
 
         def _show_idle(self):
-            """Show widget in idle state: sprite only, no pills. No animation."""
+            """Show widget in idle state: sprite only, no pills, no rope, no animation."""
             self._bob_timer.stop()
+            self.sprite.show_rope = False
             self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
+            self.sprite.update()
             self._container.hide()
             self._badge.hide()
             if not self.isVisible():
