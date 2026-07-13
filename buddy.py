@@ -584,9 +584,11 @@ def run_daemon():
             self._stale_timer.timeout.connect(self._cleanup_stale_requests)
             self._stale_timer.start()
 
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self.setMouseTracking(True)
             self.winId()  # Force NSWindow creation now so the pin timer finds it
             QTimer.singleShot(100, self._pin_to_all_spaces)
+            if self._idle_visible:
+                QTimer.singleShot(500, self._show_idle)
 
         # ── Layout helpers ─────────────────────────────────────────────────────
 
@@ -771,7 +773,7 @@ def run_daemon():
 
         def mousePressEvent(self, event):
             if event.button() == Qt.MouseButton.LeftButton:
-                if event.position().y() < self._sprite_h:
+                if self.sprite.geometry().contains(event.position().toPoint()):
                     self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
                     event.accept()
                     return
@@ -785,7 +787,15 @@ def run_daemon():
                 self.move(new_pos)
                 event.accept()
                 return
+            if self.sprite.geometry().contains(event.position().toPoint()):
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                self.unsetCursor()
             super().mouseMoveEvent(event)
+
+        def leaveEvent(self, event):
+            self.unsetCursor()
+            super().leaveEvent(event)
 
         def mouseReleaseEvent(self, event):
             if self._drag_offset is not None:
