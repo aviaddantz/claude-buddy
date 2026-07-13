@@ -815,7 +815,9 @@ def run_daemon():
                 self.do_hide()
 
         def _show_idle(self):
-            """Show widget in idle state: sprite only, no pills."""
+            """Show widget in idle state: sprite only, no pills. No animation."""
+            self._bob_timer.stop()
+            self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
             self._container.hide()
             self._badge.hide()
             if not self.isVisible():
@@ -832,8 +834,8 @@ def run_daemon():
                 self.show()
                 self._pin_to_all_spaces()
                 QTimer.singleShot(100, self._pin_to_all_spaces)
-                self._bob_tick = 0
-                self._bob_timer.start()
+                self._bob_timer.stop()
+                self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
 
         # ── Pill signal handlers ───────────────────────────────────────────────
 
