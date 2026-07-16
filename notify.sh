@@ -20,7 +20,59 @@ except Exception:
 }
 
 if [ "$MODE" = "session_start" ]; then
-    _send_socket_cmd '{"cmd":"session_start"}'
+    # Read session_id from hook JSON (same pattern as session_end)
+    _SESSION_ID_START=""
+    if [ ! -t 0 ]; then
+        _SESSION_ID_START=$(cat | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+    fi
+
+    _FOLDER=$(basename "$PWD")
+    _ITERM="${ITERM_SESSION_ID:-}"
+
+    # Get intent from terminal tab title or Claude desktop window title
+    if [ -n "$_ITERM" ]; then
+        _SOURCE="terminal"
+        _CLAUDE_UUID="${_ITERM#*:}"  # strip "w0t0p0:" prefix if present
+        _INTENT=$(osascript <<APPLESCRIPT 2>/dev/null
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if unique ID of s is "$_CLAUDE_UUID" then
+          return name of s
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return ""
+end tell
+APPLESCRIPT
+)
+    else
+        _SOURCE="desktop"
+        _INTENT=$(osascript -e 'tell application "System Events" to tell process "Claude" to get title of window 1' 2>/dev/null || echo "")
+    fi
+
+    _PAYLOAD=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'cmd': 'session_start',
+    'session_id': sys.argv[1],
+    'cwd': sys.argv[2],
+    'folder': sys.argv[3],
+    'intent': sys.argv[4],
+    'source': sys.argv[5],
+    'iterm_session_id': sys.argv[6],
+}))" "$_SESSION_ID_START" "$PWD" "$_FOLDER" "${_INTENT:-}" "$_SOURCE" "$_ITERM" 2>/dev/null)
+
+    _send_socket_cmd "$_PAYLOAD"
     exit 0
 fi
 
