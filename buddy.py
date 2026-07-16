@@ -785,6 +785,8 @@ def run_daemon():
                 self._update_window_size()
 
         def _show_session_rows(self):
+            if self._session_rows_visible:
+                return  # already shown, avoid double-installing click filter
             if not self._sessions:
                 return
             # Rebuild rows fresh (clears stale widgets from any prior show)
