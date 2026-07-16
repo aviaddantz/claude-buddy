@@ -65,7 +65,7 @@ def run_daemon():
         show_signal = pyqtSignal(dict)   # carries payload dict
         hide_signal = pyqtSignal()
         cancel_signal = pyqtSignal(str)  # carries pipe path
-        session_start_signal = pyqtSignal()
+        session_start_signal = pyqtSignal(dict)
         session_end_signal = pyqtSignal(str)  # carries session_id
         set_idle_visible_signal = pyqtSignal(bool)
 
@@ -99,7 +99,7 @@ def run_daemon():
                     elif cmd == "cancel":
                         self.cancel_signal.emit(msg.get("pipe", ""))
                     elif cmd == "session_start":
-                        self.session_start_signal.emit()
+                        self.session_start_signal.emit(msg)
                     elif cmd == "session_end":
                         self.session_end_signal.emit(msg.get("session_id", ""))
                     elif cmd == "set_idle_visible":
@@ -533,6 +533,9 @@ def run_daemon():
             self._base_y = 80
             self._drag_offset = None
             self._session_count = 0
+            self._sessions: dict = {}  # keyed by session_id, value is session payload dict
+            self._session_rows_visible = False
+            self._click_filter = None
             self._idle_visible = os.path.exists(os.path.expanduser("~/.nudge-idle-visible"))
 
             # --- Sprite ---
@@ -844,13 +847,18 @@ def run_daemon():
             self._current_index = 0
             self.hide()
 
-        def on_session_start(self):
+        def on_session_start(self, payload: dict):
             self._session_count += 1
+            session_id = payload.get("session_id", "")
+            if session_id:
+                self._sessions[session_id] = payload
             if self._idle_visible and not self._requests and not self.isVisible():
                 self._show_idle()
 
         def on_session_end(self, session_id: str):
             self._session_count = max(0, self._session_count - 1)
+            if session_id and session_id in self._sessions:
+                del self._sessions[session_id]
             if session_id:
                 to_kill = [req for req in self._requests
                            if req.get("session_id", "") == session_id]
