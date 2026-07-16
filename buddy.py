@@ -848,9 +848,9 @@ def run_daemon():
             self.hide()
 
         def on_session_start(self, payload: dict):
-            self._session_count += 1
             session_id = payload.get("session_id", "")
             if session_id:
+                self._session_count += 1
                 self._sessions[session_id] = payload
             if self._idle_visible and not self._requests and not self.isVisible():
                 self._show_idle()
