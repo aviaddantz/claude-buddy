@@ -55,7 +55,7 @@ RISK_COLORS = {
 def run_daemon():
     from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QSizePolicy, QPushButton
     from PyQt6.QtCore import (
-        Qt, QThread, pyqtSignal, QPointF, QRectF, QTimer
+        Qt, QThread, pyqtSignal, QPointF, QRectF, QTimer, QEvent, QObject
     )
     from PyQt6.QtGui import (
         QFont, QFontMetrics, QColor, QPainter, QPainterPath, QPen, QBrush
@@ -505,6 +505,93 @@ def run_daemon():
                     self.activated.emit(self._index)
             super().mousePressEvent(event)
 
+    class _GlobalClickFilter(QObject):
+        """Installed while session rows are visible; hides rows on any click outside the widget."""
+        def __init__(self, widget, callback):
+            super().__init__()
+            self._widget = widget
+            self._callback = callback
+
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Type.MouseButtonPress:
+                try:
+                    gpos = event.globalPosition().toPoint()
+                except AttributeError:
+                    gpos = event.globalPos()
+                if not self._widget.geometry().contains(gpos):
+                    self._callback()
+            return False
+
+    class _SessionRowWidget(QWidget):
+        clicked = pyqtSignal(dict)
+
+        def __init__(self, session: dict, parent=None):
+            super().__init__(parent)
+            self._session = session
+            self._hovered = False
+            self.setFixedHeight(28)
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(8, 0, 8, 0)
+            layout.setSpacing(5)
+
+            dot = QWidget()
+            dot.setFixedSize(6, 6)
+            dot.setStyleSheet("background: #4CAF50; border-radius: 3px;")
+            layout.addWidget(dot)
+
+            folder = session.get("folder", "?")
+            intent = session.get("intent", "")
+
+            folder_lbl = QLabel(folder)
+            folder_lbl.setStyleSheet(
+                "color: #9c8aff; font-size: 11px; font-weight: 600; background: transparent;"
+            )
+            folder_lbl.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+            layout.addWidget(folder_lbl)
+
+            if intent:
+                sep_lbl = QLabel("|")
+                sep_lbl.setStyleSheet("color: #444; font-size: 11px; background: transparent;")
+                sep_lbl.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+                layout.addWidget(sep_lbl)
+
+                intent_lbl = QLabel()
+                intent_lbl.setStyleSheet("color: #777; font-size: 11px; background: transparent;")
+                intent_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                # Pre-elide to 130px — intent label gets ~130px after folder and sep
+                fm = intent_lbl.fontMetrics()
+                intent_lbl.setText(fm.elidedText(intent, Qt.TextElideMode.ElideRight, 130))
+                layout.addWidget(intent_lbl, 1)
+            else:
+                layout.addStretch(1)
+
+        def paintEvent(self, event):
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            bg = QColor("#242424") if self._hovered else QColor("#1a1a1a")
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(self.rect()), 4, 4)
+            p.fillPath(path, QBrush(bg))
+            p.fillRect(0, 0, 2, self.height(), QColor("#7c6af7"))
+            p.end()
+
+        def enterEvent(self, event):
+            self._hovered = True
+            self.update()
+            super().enterEvent(event)
+
+        def leaveEvent(self, event):
+            self._hovered = False
+            self.update()
+            super().leaveEvent(event)
+
+        def mousePressEvent(self, event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.clicked.emit(self._session)
+            super().mousePressEvent(event)
+
     class ChipWidget(QWidget):
         """Single chip with multi-session queue support."""
 
@@ -554,6 +641,16 @@ def run_daemon():
             self._container_layout = QVBoxLayout(self._container)
             self._container_layout.setContentsMargins(0, 0, 0, 0)
             self._container_layout.setSpacing(6)
+
+            # --- Session rows (shown on double-click, above pills) ---
+            self._session_rows_container = QWidget(self)
+            self._session_rows_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self._session_rows_container.setFixedWidth(200)
+            self._session_rows_container.move(0, self._sprite_h)
+            self._session_rows_container.hide()
+            self._session_rows_layout = QVBoxLayout(self._session_rows_container)
+            self._session_rows_layout.setContentsMargins(4, 0, 4, 8)
+            self._session_rows_layout.setSpacing(5)
 
             # --- Count badge (window-level, floats at top-right corner of first pill) ---
             self._badge = QLabel("")
@@ -606,7 +703,8 @@ def run_daemon():
             n = self._container_layout.count()
             total_pills_h += spacing * max(n - 1, 0)
             self._container.setFixedSize(200, max(total_pills_h, 1))
-            total_h = self._sprite_h + total_pills_h
+            rows_h = self._session_rows_container.height() if self._session_rows_visible else 0
+            total_h = self._sprite_h + rows_h + total_pills_h
             self.setFixedHeight(max(total_h, self._sprite_h + 10))
 
         def _update_window_size_for_pill(self, pill):
@@ -621,7 +719,8 @@ def run_daemon():
             n = self._container_layout.count()
             total_pills_h += spacing * max(n - 1, 0)
             self._container.setFixedSize(200, max(total_pills_h, 1))
-            total_h = self._sprite_h + total_pills_h
+            rows_h = self._session_rows_container.height() if self._session_rows_visible else 0
+            total_h = self._sprite_h + rows_h + total_pills_h
             self.setFixedHeight(max(total_h, self._sprite_h + 10))
 
         # ── Sessions ───────────────────────────────────────────────────────────
@@ -665,6 +764,72 @@ def run_daemon():
             self._update_window_size()
             if self.isVisible():
                 self._reanchor()
+
+        def _rebuild_session_rows(self):
+            """Repopulate session rows from self._sessions. Auto-hides if store is empty."""
+            while self._session_rows_layout.count():
+                item = self._session_rows_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            for session in self._sessions.values():
+                row = _SessionRowWidget(session)
+                row.clicked.connect(self._on_session_row_clicked)
+                self._session_rows_layout.addWidget(row)
+            if not self._sessions and self._session_rows_visible:
+                self._hide_session_rows()
+            elif self._session_rows_visible:
+                self._session_rows_container.adjustSize()
+                rows_h = self._session_rows_container.sizeHint().height()
+                self._session_rows_container.setFixedHeight(rows_h)
+                self._container.move(0, self._sprite_h + rows_h)
+                self._update_window_size()
+
+        def _show_session_rows(self):
+            if not self._sessions:
+                return
+            # Rebuild rows fresh (clears stale widgets from any prior show)
+            while self._session_rows_layout.count():
+                item = self._session_rows_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            for session in self._sessions.values():
+                row = _SessionRowWidget(session)
+                row.clicked.connect(self._on_session_row_clicked)
+                self._session_rows_layout.addWidget(row)
+            self._session_rows_container.adjustSize()
+            rows_h = self._session_rows_container.sizeHint().height()
+            self._session_rows_container.setFixedHeight(rows_h)
+            self._session_rows_container.move(0, self._sprite_h)
+            self._session_rows_container.show()
+            self._session_rows_visible = True
+            self._container.move(0, self._sprite_h + rows_h)
+            self._update_window_size()
+            if not self.isVisible():
+                self._position_window()
+                self.show()
+                self._pin_to_all_spaces()
+            self._click_filter = _GlobalClickFilter(self, self._hide_session_rows)
+            QApplication.instance().installEventFilter(self._click_filter)
+
+        def _hide_session_rows(self):
+            self._session_rows_container.hide()
+            self._session_rows_visible = False
+            self._container.move(0, self._sprite_h)
+            self._update_window_size()
+            if self._click_filter:
+                QApplication.instance().removeEventFilter(self._click_filter)
+                self._click_filter = None
+            if self._requests:
+                return  # approval pills are showing, leave widget as-is
+            if self._idle_visible and self._session_count > 0:
+                self._show_idle()
+            else:
+                self.do_hide()
+
+        def _on_session_row_clicked(self, session: dict):
+            iterm_session_id = session.get("iterm_session_id", "")
+            self._focus_terminal_with_session(iterm_session_id)
+            self._hide_session_rows()
 
         # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -859,6 +1024,8 @@ def run_daemon():
             self._session_count = max(0, self._session_count - 1)
             if session_id and session_id in self._sessions:
                 del self._sessions[session_id]
+            if self._session_rows_visible:
+                self._rebuild_session_rows()
             if session_id:
                 to_kill = [req for req in self._requests
                            if req.get("session_id", "") == session_id]
