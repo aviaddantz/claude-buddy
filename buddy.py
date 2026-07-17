@@ -796,11 +796,58 @@ def run_daemon():
                 self._container.move(0, self._sprite_h + rows_h)
                 self._update_window_size()
 
+        def _refresh_session_intents(self):
+            """Re-read intents from transcripts for sessions that still have an empty intent."""
+            changed = False
+            for sess in self._sessions.values():
+                if sess.get('intent') or not sess.get('transcript_path'):
+                    continue
+                tp = sess['transcript_path']
+                try:
+                    with open(tp, 'r', errors='replace') as f:
+                        for line in f:
+                            try:
+                                d = json.loads(line)
+                                if d.get('type') != 'user':
+                                    continue
+                                content = d.get('message', {}).get('content', '')
+                                text = ''
+                                if isinstance(content, list):
+                                    for c in content:
+                                        if isinstance(c, dict) and c.get('type') == 'text':
+                                            text = c['text'].strip()
+                                            break
+                                elif isinstance(content, str):
+                                    text = content.strip()
+                                if text and not text.startswith('<') and not text.startswith('['):
+                                    sess['intent'] = text[:80]
+                                    changed = True
+                                    break
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            if changed:
+                try:
+                    with open(SESSIONS_FILE, 'w') as f:
+                        json.dump(self._sessions, f)
+                except Exception:
+                    pass
+
+        def _deferred_intent_refresh(self, session_id: str):
+            sess = self._sessions.get(session_id)
+            if not sess or sess.get('intent'):
+                return
+            self._refresh_session_intents()
+            if self._session_rows_visible:
+                self._rebuild_session_rows()
+
         def _show_session_rows(self):
             if self._session_rows_visible:
                 return  # already shown, avoid double-installing click filter
             if not self._sessions:
                 return
+            self._refresh_session_intents()
             self._repopulate_session_rows_layout()
             self._session_rows_container.adjustSize()
             rows_h = self._session_rows_container.sizeHint().height()
@@ -1063,6 +1110,10 @@ def run_daemon():
             if session_id:
                 self._session_count += 1
                 self._sessions[session_id] = payload
+                if not payload.get('intent') and payload.get('transcript_path'):
+                    QTimer.singleShot(15000, lambda sid=session_id: self._deferred_intent_refresh(sid))
+            if self._session_rows_visible:
+                self._rebuild_session_rows()
             if self._idle_visible and not self._requests and not self.isVisible():
                 self._show_idle()
 
@@ -1248,8 +1299,13 @@ end tell
                     subprocess.run(["osascript", "-e", f'tell application "{app}" to activate'], capture_output=True)
                     return
 
-            # 3. No UUID — for explicit desktop source, activate Claude directly
+            # 3. No UUID — for explicit desktop source, open Claude with the project CWD
             if source == "desktop":
+                if cwd and os.path.isdir(cwd):
+                    # open -a "Claude" <cwd> focuses Claude and navigates to that project
+                    result = subprocess.run(["open", "-a", "Claude", cwd], capture_output=True)
+                    if result.returncode == 0:
+                        return
                 if _is_running("Claude"):
                     subprocess.run(["osascript", "-e", 'tell application "Claude" to activate'], capture_output=True)
                 return
