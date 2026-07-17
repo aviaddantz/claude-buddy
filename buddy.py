@@ -900,7 +900,9 @@ def run_daemon():
             iterm_session_id = session.get("iterm_session_id", "")
             source = session.get("source", "unknown")
             cwd = session.get("cwd", "")
-            self._focus_terminal_with_session(iterm_session_id, source=source, cwd=cwd)
+            session_id = session.get("session_id", "")
+            self._focus_terminal_with_session(iterm_session_id, source=source, cwd=cwd,
+                                               session_id=session_id)
             self._hide_session_rows()
 
         # ── Lifecycle ──────────────────────────────────────────────────────────
@@ -1253,7 +1255,7 @@ def run_daemon():
         # ── Terminal focus ─────────────────────────────────────────────────────
 
         def _focus_terminal_with_session(self, iterm_session: str, term_program: str = "",
-                                           source: str = "", cwd: str = ""):
+                                           source: str = "", cwd: str = "", session_id: str = ""):
             def _is_running(app_name):
                 r = subprocess.run(
                     ["osascript", "-e", f'tell application "System Events" to return (name of processes) contains "{app_name}"'],
@@ -1299,11 +1301,11 @@ end tell
                     subprocess.run(["osascript", "-e", f'tell application "{app}" to activate'], capture_output=True)
                     return
 
-            # 3. No UUID — for explicit desktop source, open Claude with the project CWD
+            # 3. No UUID — for explicit desktop source, deep-link into Claude Code session
             if source == "desktop":
-                if cwd and os.path.isdir(cwd):
-                    # open -a "Claude" <cwd> focuses Claude and navigates to that project
-                    result = subprocess.run(["open", "-a", "Claude", cwd], capture_output=True)
+                if session_id:
+                    # claude://code/<session_id> navigates directly to that conversation
+                    result = subprocess.run(["open", f"claude://code/{session_id}"], capture_output=True)
                     if result.returncode == 0:
                         return
                 if _is_running("Claude"):
