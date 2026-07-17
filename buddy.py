@@ -975,7 +975,28 @@ def run_daemon():
                 return
             super().mouseReleaseEvent(event)
 
+        def mouseDoubleClickEvent(self, event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                if self.sprite.geometry().contains(event.position().toPoint()):
+                    # Cancel any drag that the second click's mousePressEvent may have started
+                    self._drag_offset = None
+                    self._toggle_session_rows()
+                    event.accept()
+                    return
+            super().mouseDoubleClickEvent(event)
+
+        def _toggle_session_rows(self):
+            if not self._sessions:
+                return
+            if self._session_rows_visible:
+                self._hide_session_rows()
+            else:
+                self._show_session_rows()
+
         def do_show(self, payload: dict):
+            # Hide session rows when an approval arrives so the pill takes priority.
+            if self._session_rows_visible:
+                self._hide_session_rows()
             # Stamp when the request was queued and record current transcript mtime.
             # The stale checker uses this to detect when Claude Code ran the tool
             # without waiting for the hook (i.e. user responded natively).
@@ -1058,6 +1079,8 @@ def run_daemon():
 
         def _show_idle(self):
             """Show widget in idle state: sprite only, no pills, no rope, no animation."""
+            if self._session_rows_visible:
+                self._hide_session_rows()
             self._bob_timer.stop()
             self.sprite.show_rope = False
             self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
