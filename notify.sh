@@ -55,10 +55,22 @@ tell application "iTerm2"
 end tell
 APPLESCRIPT
 )
+        # Strip leading spinner chars and trailing " (claude)" / " (Claude)" suffix
+        _INTENT=$(echo "$_INTENT" | python3 -c "
+import sys, re
+t = sys.stdin.read().strip()
+t = re.sub(r'^[⠀-⣿\s]+', '', t)   # strip braille spinner prefix
+t = re.sub(r'\s*\(claude\)\s*$', '', t, flags=re.IGNORECASE)
+print(t.strip())
+" 2>/dev/null || echo "$_INTENT")
     else
         _SOURCE="desktop"
-        _INTENT=$(osascript -e 'tell application "System Events" to tell process "Claude" to get title of window 1' 2>/dev/null || echo "")
+        _INTENT=""  # Claude Code desktop window has no accessible title
     fi
+
+    # Derive transcript path: ~/.claude/projects/<encoded-cwd>/<session_id>.jsonl
+    _ENCODED_CWD=$(echo "$PWD" | tr '/' '-')
+    _TRANSCRIPT_PATH="$HOME/.claude/projects/${_ENCODED_CWD}/${_SESSION_ID_START}.jsonl"
 
     _PAYLOAD=$(python3 -c "
 import json, sys
@@ -70,9 +82,35 @@ print(json.dumps({
     'intent': sys.argv[4],
     'source': sys.argv[5],
     'iterm_session_id': sys.argv[6],
-}))" "$_SESSION_ID_START" "$PWD" "$_FOLDER" "${_INTENT:-}" "$_SOURCE" "$_ITERM" 2>/dev/null)
+    'transcript_path': sys.argv[7],
+}))" "$_SESSION_ID_START" "$PWD" "$_FOLDER" "${_INTENT:-}" "$_SOURCE" "$_ITERM" "$_TRANSCRIPT_PATH" 2>/dev/null)
 
     _send_socket_cmd "$_PAYLOAD"
+
+    # Persist session to file so daemon survives restarts
+    python3 -c "
+import json, os, sys, time
+fname = os.path.expanduser('~/.nudge-sessions.json')
+try:
+    with open(fname) as f:
+        sessions = json.load(f)
+except Exception:
+    sessions = {}
+if sys.argv[1]:  # only persist if session_id is non-empty
+    sessions[sys.argv[1]] = {
+        'session_id': sys.argv[1],
+        'folder': sys.argv[2],
+        'cwd': sys.argv[3],
+        'intent': sys.argv[4],
+        'source': sys.argv[5],
+        'iterm_session_id': sys.argv[6],
+        'transcript_path': sys.argv[7],
+        'ts': time.time(),
+    }
+    with open(fname, 'w') as f:
+        json.dump(sessions, f)
+" "$_SESSION_ID_START" "$_FOLDER" "$PWD" "${_INTENT:-}" "$_SOURCE" "$_ITERM" "$_TRANSCRIPT_PATH" 2>/dev/null || true
+
     exit 0
 fi
 
@@ -89,6 +127,22 @@ except Exception:
 " 2>/dev/null || echo "")
     fi
     _send_socket_cmd "{\"cmd\":\"session_end\",\"session_id\":\"${_SESSION_ID_END}\"}"
+
+    # Remove from persistent sessions file
+    python3 -c "
+import json, os, sys
+fname = os.path.expanduser('~/.nudge-sessions.json')
+try:
+    with open(fname) as f:
+        sessions = json.load(f)
+    if sys.argv[1] in sessions:
+        del sessions[sys.argv[1]]
+        with open(fname, 'w') as f:
+            json.dump(sessions, f)
+except Exception:
+    pass
+" "$_SESSION_ID_END" 2>/dev/null || true
+
     exit 0
 fi
 
@@ -101,6 +155,18 @@ fi
 if [ "$MODE" = "idle_off" ]; then
     rm -f "$HOME/.nudge-idle-visible"
     _send_socket_cmd '{"cmd":"set_idle_visible","value":false}'
+    exit 0
+fi
+
+if [ "$MODE" = "sessions_on" ]; then
+    rm -f "$HOME/.nudge-sessions-disabled"
+    _send_socket_cmd '{"cmd":"set_sessions_enabled","value":true}'
+    exit 0
+fi
+
+if [ "$MODE" = "sessions_off" ]; then
+    touch "$HOME/.nudge-sessions-disabled"
+    _send_socket_cmd '{"cmd":"set_sessions_enabled","value":false}'
     exit 0
 fi
 

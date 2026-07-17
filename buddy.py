@@ -17,6 +17,8 @@ import signal
 import time
 
 SOCKET_PATH = "/tmp/claude-buddy.sock"
+SESSIONS_FILE = os.path.expanduser("~/.nudge-sessions.json")
+SESSIONS_STALE_SECS = 4 * 3600
 
 
 def send_command(cmd: str) -> bool:
@@ -68,6 +70,7 @@ def run_daemon():
         session_start_signal = pyqtSignal(dict)
         session_end_signal = pyqtSignal(str)  # carries session_id
         set_idle_visible_signal = pyqtSignal(bool)
+        set_sessions_enabled_signal = pyqtSignal(bool)
 
         def run(self):
             if os.path.exists(SOCKET_PATH):
@@ -104,6 +107,8 @@ def run_daemon():
                         self.session_end_signal.emit(msg.get("session_id", ""))
                     elif cmd == "set_idle_visible":
                         self.set_idle_visible_signal.emit(bool(msg.get("value", False)))
+                    elif cmd == "set_sessions_enabled":
+                        self.set_sessions_enabled_signal.emit(bool(msg.get("value", True)))
                 except Exception:
                     pass
 
@@ -119,6 +124,7 @@ def run_daemon():
         def __init__(self, parent=None):
             super().__init__(parent)
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self._rope_angle = 0.0
             self.show_rope = True
@@ -506,7 +512,7 @@ def run_daemon():
             super().mousePressEvent(event)
 
     class _GlobalClickFilter(QObject):
-        """Installed while session rows are visible; hides rows on any click outside the widget."""
+        """Catches clicks within the Qt app while session rows are visible."""
         def __init__(self, widget, callback):
             super().__init__()
             self._widget = widget
@@ -623,6 +629,8 @@ def run_daemon():
             self._sessions: dict = {}  # keyed by session_id, value is session payload dict
             self._session_rows_visible = False
             self._click_filter = None
+            self._ns_monitor = None
+            self._sessions_enabled = not os.path.exists(os.path.expanduser("~/.nudge-sessions-disabled"))
             self._idle_visible = os.path.exists(os.path.expanduser("~/.nudge-idle-visible"))
 
             # --- Sprite ---
@@ -808,6 +816,16 @@ def run_daemon():
                 self._pin_to_all_spaces()
             self._click_filter = _GlobalClickFilter(self, self._hide_session_rows)
             QApplication.instance().installEventFilter(self._click_filter)
+            # Also catch clicks in other apps via NSEvent global monitor
+            try:
+                from AppKit import NSEvent
+                NSLeftMouseDown = 1 << 1
+                def _ns_handler(ns_evt):
+                    QTimer.singleShot(0, self._hide_session_rows)
+                self._ns_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                    NSLeftMouseDown, _ns_handler)
+            except Exception:
+                self._ns_monitor = None
 
         def _hide_session_rows(self):
             self._session_rows_container.hide()
@@ -817,6 +835,13 @@ def run_daemon():
             if self._click_filter:
                 QApplication.instance().removeEventFilter(self._click_filter)
                 self._click_filter = None
+            if getattr(self, '_ns_monitor', None) is not None:
+                try:
+                    from AppKit import NSEvent
+                    NSEvent.removeMonitor_(self._ns_monitor)
+                except Exception:
+                    pass
+                self._ns_monitor = None
             if self._requests:
                 return  # approval pills are showing, leave widget as-is
             if self._idle_visible and self._session_count > 0:
@@ -826,7 +851,9 @@ def run_daemon():
 
         def _on_session_row_clicked(self, session: dict):
             iterm_session_id = session.get("iterm_session_id", "")
-            self._focus_terminal_with_session(iterm_session_id)
+            source = session.get("source", "unknown")
+            cwd = session.get("cwd", "")
+            self._focus_terminal_with_session(iterm_session_id, source=source, cwd=cwd)
             self._hide_session_rows()
 
         # ── Lifecycle ──────────────────────────────────────────────────────────
@@ -982,7 +1009,7 @@ def run_daemon():
             super().mouseDoubleClickEvent(event)
 
         def _toggle_session_rows(self):
-            if not self._sessions:
+            if not self._sessions_enabled or not self._sessions:
                 return
             if self._session_rows_visible:
                 self._hide_session_rows()
@@ -1072,6 +1099,11 @@ def run_daemon():
                 self._show_idle()
             elif not value and self.isVisible() and not self._requests:
                 self.do_hide()
+
+        def on_set_sessions_enabled(self, value: bool):
+            self._sessions_enabled = value
+            if not value and self._session_rows_visible:
+                self._hide_session_rows()
 
         def _show_idle(self):
             """Show widget in idle state: sprite only, no pills, no rope, no animation."""
@@ -1169,8 +1201,16 @@ def run_daemon():
 
         # ── Terminal focus ─────────────────────────────────────────────────────
 
-        def _focus_terminal_with_session(self, iterm_session: str, term_program: str = ""):
-            # 1. iTerm2: use exact session UUID for precise tab targeting
+        def _focus_terminal_with_session(self, iterm_session: str, term_program: str = "",
+                                           source: str = "", cwd: str = ""):
+            def _is_running(app_name):
+                r = subprocess.run(
+                    ["osascript", "-e", f'tell application "System Events" to return (name of processes) contains "{app_name}"'],
+                    capture_output=True, text=True,
+                )
+                return r.stdout.strip() == "true"
+
+            # 1. iTerm2: exact session UUID
             if iterm_session:
                 claude_uuid = iterm_session.split(":")[1] if ":" in iterm_session else iterm_session
                 script = f'''
@@ -1208,20 +1248,92 @@ end tell
                     subprocess.run(["osascript", "-e", f'tell application "{app}" to activate'], capture_output=True)
                     return
 
-            # 3. No terminal context — likely Claude Desktop
-            def _is_running(app_name):
-                r = subprocess.run(
-                    ["osascript", "-e", f'tell application "System Events" to return (name of processes) contains "{app_name}"'],
-                    capture_output=True, text=True,
-                )
-                return r.stdout.strip() == "true"
+            # 3. No UUID — for explicit desktop source, activate Claude directly
+            if source == "desktop":
+                if _is_running("Claude"):
+                    subprocess.run(["osascript", "-e", 'tell application "Claude" to activate'], capture_output=True)
+                return
 
+            # 4. Terminal or unknown: try to find the right iTerm2 tab by CWD
+            #    Look for a node (Claude Code CLI) process running in cwd, match its TTY to an iTerm2 session
+            if cwd and _is_running("iTerm2"):
+                found_uuid = None
+                try:
+                    script = '''
+tell application "iTerm2"
+  set out to ""
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        set out to out & (unique ID of s) & "|" & (tty of s) & "\n"
+      end repeat
+    end repeat
+  end repeat
+  return out
+end tell
+'''
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)
+                    for line in r.stdout.strip().splitlines():
+                        if '|' not in line:
+                            continue
+                        uuid, tty = line.split('|', 1)
+                        tty_name = tty.strip().replace('/dev/', '')
+                        if not tty_name:
+                            continue
+                        ps_r = subprocess.run(
+                            ["ps", "-t", tty_name, "-o", "pid=,comm="],
+                            capture_output=True, text=True
+                        )
+                        for ps_line in ps_r.stdout.splitlines():
+                            parts = ps_line.strip().split(None, 1)
+                            if len(parts) >= 2 and 'node' in parts[1].lower():
+                                lsof_r = subprocess.run(
+                                    ["lsof", "-p", parts[0], "-d", "cwd", "-Fn"],
+                                    capture_output=True, text=True, timeout=2
+                                )
+                                for lsof_line in lsof_r.stdout.splitlines():
+                                    if lsof_line.startswith('n') and lsof_line[1:] == cwd:
+                                        found_uuid = uuid.strip()
+                                        break
+                            if found_uuid:
+                                break
+                        if found_uuid:
+                            break
+                except Exception:
+                    pass
+
+                if found_uuid:
+                    focus_script = f'''
+tell application "iTerm2"
+  activate
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if unique ID of s is "{found_uuid}" then
+          tell t to select
+          tell w to select
+          return
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+'''
+                    subprocess.run(["osascript", "-e", focus_script], capture_output=True)
+                    return
+                # No node process found in cwd — it's probably a desktop session
+                if _is_running("Claude"):
+                    subprocess.run(["osascript", "-e", 'tell application "Claude" to activate'], capture_output=True)
+                    return
+                # Fall through to activate iTerm2 generically
+                subprocess.run(["osascript", "-e", 'tell application "iTerm2" to activate'], capture_output=True)
+                return
+
+            # 5. No iTerm2 — last resort
             if _is_running("Claude"):
                 subprocess.run(["osascript", "-e", 'tell application "Claude" to activate'], capture_output=True)
                 return
-
-            # 4. Last resort: scan for any running terminal
-            for app in ["iTerm2", "Terminal", "Warp", "Ghostty", "Alacritty", "Hyper"]:
+            for app in ["Terminal", "Warp", "Ghostty", "Alacritty", "Hyper"]:
                 if _is_running(app):
                     subprocess.run(["osascript", "-e", f'tell application "{app}" to activate'], capture_output=True)
                     return
@@ -1290,7 +1402,113 @@ end tell
     from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
     NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
+    def _read_intent_from_transcript(transcript_path):
+        """Return first real user message from a transcript, or ''."""
+        try:
+            with open(transcript_path, 'r', errors='replace') as f:
+                for line in f:
+                    try:
+                        d = json.loads(line)
+                        if d.get('type') != 'user':
+                            continue
+                        content = d.get('message', {}).get('content', '')
+                        if isinstance(content, list):
+                            for c in content:
+                                if isinstance(c, dict) and c.get('type') == 'text':
+                                    text = c['text'].strip()
+                                    if text and not text.startswith('<') and not text.startswith('['):
+                                        return text[:80]
+                        elif isinstance(content, str):
+                            text = content.strip()
+                            if text and not text.startswith('<') and not text.startswith('['):
+                                return text[:80]
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return ''
+
+    def _load_persisted_sessions():
+        """Load sessions from file + scan transcripts as fallback. Returns {session_id: payload}."""
+        sessions = {}
+        try:
+            with open(SESSIONS_FILE) as f:
+                sessions = json.load(f)
+        except Exception:
+            pass
+
+        # Fallback: scan transcripts for recent sessions not already in file
+        projects_dir = os.path.expanduser("~/.claude/projects")
+        now = time.time()
+        if os.path.isdir(projects_dir):
+            for encoded in os.listdir(projects_dir):
+                project_dir = os.path.join(projects_dir, encoded)
+                if not os.path.isdir(project_dir):
+                    continue
+                folder = encoded.rstrip('-').rsplit('-', 1)[-1] if '-' in encoded else encoded
+                try:
+                    entries = os.listdir(project_dir)
+                except Exception:
+                    continue
+                for fname in entries:
+                    if not fname.endswith('.jsonl'):
+                        continue
+                    sid = fname[:-6]
+                    if sid in sessions:
+                        continue
+                    fpath = os.path.join(project_dir, fname)
+                    try:
+                        mtime = os.path.getmtime(fpath)
+                        if now - mtime > SESSIONS_STALE_SECS:
+                            continue
+                        sessions[sid] = {
+                            'session_id': sid,
+                            'folder': folder,
+                            'cwd': '/' + encoded.lstrip('-').replace('-', '/'),
+                            'intent': '',
+                            'source': 'unknown',
+                            'iterm_session_id': '',
+                            'transcript_path': fpath,
+                            'ts': mtime,
+                        }
+                    except Exception:
+                        pass
+
+        # Prune stale, enrich empty intents, save back if changed
+        valid = {}
+        changed = False
+        for sid, sess in sessions.items():
+            tp = sess.get('transcript_path', '')
+            if tp and os.path.exists(tp):
+                try:
+                    if now - os.path.getmtime(tp) > SESSIONS_STALE_SECS:
+                        changed = True
+                        continue
+                except Exception:
+                    pass
+            if not sess.get('intent') and tp:
+                intent = _read_intent_from_transcript(tp)
+                if intent:
+                    sess['intent'] = intent
+                    changed = True
+            valid[sid] = sess
+
+        if changed:
+            try:
+                with open(SESSIONS_FILE, 'w') as f:
+                    json.dump(valid, f)
+            except Exception:
+                pass
+
+        return valid
+
     window = ChipWidget()
+
+    # Restore sessions from persistent file + transcript scan
+    for _sid, _sess in _load_persisted_sessions().items():
+        if _sid:
+            window._sessions[_sid] = _sess
+            window._session_count += 1
 
     server_thread = SocketServer()
     server_thread.show_signal.connect(window.do_show)
@@ -1299,6 +1517,7 @@ end tell
     server_thread.session_start_signal.connect(window.on_session_start)
     server_thread.session_end_signal.connect(window.on_session_end)  # str session_id
     server_thread.set_idle_visible_signal.connect(window.on_set_idle_visible)
+    server_thread.set_sessions_enabled_signal.connect(window.on_set_sessions_enabled)
     server_thread.daemon = True
     server_thread.start()
 

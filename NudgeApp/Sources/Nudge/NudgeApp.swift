@@ -58,6 +58,11 @@ struct NudgeApp: App {
                 set: { _ in daemon.toggleIdleVisible() }
             ))
 
+            Toggle("Show sessions on double-click", isOn: Binding(
+                get: { daemon.sessionsEnabled },
+                set: { _ in daemon.toggleSessionsEnabled() }
+            ))
+
             Toggle("Launch at Login", isOn: Binding(
                 get: { daemon.launchAtLogin },
                 set: { _ in daemon.toggleLaunchAtLogin() }
