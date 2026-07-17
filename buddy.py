@@ -765,8 +765,8 @@ def run_daemon():
             if self.isVisible():
                 self._reanchor()
 
-        def _rebuild_session_rows(self):
-            """Repopulate session rows from self._sessions. Auto-hides if store is empty."""
+        def _repopulate_session_rows_layout(self):
+            """Clear and refill the session rows layout from self._sessions."""
             while self._session_rows_layout.count():
                 item = self._session_rows_layout.takeAt(0)
                 if item.widget():
@@ -775,6 +775,10 @@ def run_daemon():
                 row = _SessionRowWidget(session)
                 row.clicked.connect(self._on_session_row_clicked)
                 self._session_rows_layout.addWidget(row)
+
+        def _rebuild_session_rows(self):
+            """Repopulate session rows from self._sessions. Auto-hides if store is empty."""
+            self._repopulate_session_rows_layout()
             if not self._sessions and self._session_rows_visible:
                 self._hide_session_rows()
             elif self._session_rows_visible:
@@ -789,15 +793,7 @@ def run_daemon():
                 return  # already shown, avoid double-installing click filter
             if not self._sessions:
                 return
-            # Rebuild rows fresh (clears stale widgets from any prior show)
-            while self._session_rows_layout.count():
-                item = self._session_rows_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-            for session in self._sessions.values():
-                row = _SessionRowWidget(session)
-                row.clicked.connect(self._on_session_row_clicked)
-                self._session_rows_layout.addWidget(row)
+            self._repopulate_session_rows_layout()
             self._session_rows_container.adjustSize()
             rows_h = self._session_rows_container.sizeHint().height()
             self._session_rows_container.setFixedHeight(rows_h)
