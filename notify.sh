@@ -386,23 +386,32 @@ if [ "$BUDDY_CONNECTED" = false ]; then
 fi
 
 # Wait for user decision — poll with short timeout so we can detect if
-# parent was killed or reparented
+# parent was killed or reparented.
+# Grace period: skip PPID/reparent checks for the first 5 seconds so the
+# desktop app's fast-reparenting (spawning shell exits immediately after
+# forking notify.sh) doesn't kill the widget before the user can interact.
 echo "[notify.sh $$] entering wait loop ppid=$PPID" >> /tmp/claude-buddy.log
 HOOK_PPID="$PPID"
+_LOOP_START=$(date +%s)
+_GRACE_SECS=5
 DECISION=""
 while [ -z "$DECISION" ]; do
     DECISION=$(timeout 0.3 cat "$PIPE" 2>/dev/null || true)
     if [ -z "$DECISION" ]; then
-        # ESC / abort: parent shell killed by Claude Code
-        if ! kill -0 "$HOOK_PPID" 2>/dev/null; then
-            echo "[notify.sh $$] breaking: ppid=$HOOK_PPID dead" >> /tmp/claude-buddy.log
-            break
-        fi
-        # Reparented: parent was killed, we got adopted by launchd/init
-        CURRENT_PPID=$(ps -p $$ -o ppid= 2>/dev/null | tr -d ' ')
-        if [ -n "$CURRENT_PPID" ] && [ "$CURRENT_PPID" != "$HOOK_PPID" ]; then
-            echo "[notify.sh $$] breaking: reparented from $HOOK_PPID to $CURRENT_PPID" >> /tmp/claude-buddy.log
-            break
+        _NOW=$(date +%s)
+        _ELAPSED=$(( _NOW - _LOOP_START ))
+        if [ "$_ELAPSED" -ge "$_GRACE_SECS" ]; then
+            # ESC / abort: parent shell killed by Claude Code
+            if ! kill -0 "$HOOK_PPID" 2>/dev/null; then
+                echo "[notify.sh $$] breaking: ppid=$HOOK_PPID dead after ${_ELAPSED}s" >> /tmp/claude-buddy.log
+                break
+            fi
+            # Reparented: parent was killed, we got adopted by launchd/init
+            CURRENT_PPID=$(ps -p $$ -o ppid= 2>/dev/null | tr -d ' ')
+            if [ -n "$CURRENT_PPID" ] && [ "$CURRENT_PPID" != "$HOOK_PPID" ]; then
+                echo "[notify.sh $$] breaking: reparented from $HOOK_PPID to $CURRENT_PPID after ${_ELAPSED}s" >> /tmp/claude-buddy.log
+                break
+            fi
         fi
         # Note: transcript mtime check removed -- it false-triggered constantly because
         # Claude Code writes to the transcript during normal execution, causing
