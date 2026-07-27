@@ -129,6 +129,15 @@ def run_daemon():
             self._rope_angle = 0.0
             self.show_rope = True
 
+        def hit_rect(self):
+            """Tight rect covering just the character body (excludes transparent rope area above)."""
+            w = self.width()
+            h = self.height()
+            unit = w / 15.5
+            char_h = 10.5 * unit
+            oy = int(h - char_h - unit)
+            return self.geometry().adjusted(0, oy, 0, 0)
+
         def set_rope_angle(self, angle: float):
             self._rope_angle = angle
             self.update()
@@ -1015,7 +1024,7 @@ def run_daemon():
 
         def mousePressEvent(self, event):
             if event.button() == Qt.MouseButton.LeftButton:
-                if self.sprite.geometry().contains(event.position().toPoint()):
+                if self.sprite.hit_rect().contains(event.position().toPoint()):
                     self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
                     event.accept()
                     return
@@ -1029,7 +1038,7 @@ def run_daemon():
                 self.move(new_pos)
                 event.accept()
                 return
-            if self.sprite.geometry().contains(event.position().toPoint()):
+            if self.sprite.hit_rect().contains(event.position().toPoint()):
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             else:
                 self.unsetCursor()
@@ -1049,7 +1058,7 @@ def run_daemon():
 
         def mouseDoubleClickEvent(self, event):
             if event.button() == Qt.MouseButton.LeftButton:
-                if self.sprite.geometry().contains(event.position().toPoint()):
+                if self.sprite.hit_rect().contains(event.position().toPoint()):
                     # Cancel any drag that the second click's mousePressEvent may have started
                     self._drag_offset = None
                     self._toggle_session_rows()
