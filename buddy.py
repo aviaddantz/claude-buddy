@@ -641,6 +641,7 @@ def run_daemon():
             self._ns_monitor = None
             self._sessions_enabled = not os.path.exists(os.path.expanduser("~/.nudge-sessions-disabled"))
             self._idle_visible = os.path.exists(os.path.expanduser("~/.nudge-idle-visible"))
+            self._flip_pills_h = 0  # extra Y offset added to sprite when pills are shown above it
 
             # --- Sprite ---
             self.sprite = SpriteWidget(self)
@@ -691,7 +692,7 @@ def run_daemon():
             def _bob_step():
                 self._bob_tick += 1
                 offset = int(BOB_AMP * math.sin(self._bob_tick * 0.12))
-                self.sprite.move((200 - SPRITE_W) // 2, self._sprite_rest_y - offset)
+                self.sprite.move((200 - SPRITE_W) // 2, self._flip_pills_h + self._sprite_rest_y - offset)
                 self.sprite.set_rope_angle(self._bob_tick * 0.12)
             self._bob_timer.timeout.connect(_bob_step)
 
@@ -709,6 +710,22 @@ def run_daemon():
 
         # ── Layout helpers ─────────────────────────────────────────────────────
 
+        def _compute_flip(self):
+            screen = QApplication.primaryScreen().geometry()
+            return self._base_y > screen.height() * 0.55
+
+        def _apply_flip_layout(self, total_pills_h, rows_h=0):
+            """Reposition container, badge, and sprite based on whether the widget is in the lower screen half."""
+            if self._compute_flip() and total_pills_h > 0:
+                self._flip_pills_h = total_pills_h + rows_h
+                self._container.move(0, 0)
+                self._badge.move(200 - 9, -9)
+            else:
+                self._flip_pills_h = 0
+                self._container.move(0, self._sprite_h + rows_h)
+                self._badge.move(200 - 9, self._sprite_h + rows_h - 9)
+            self.sprite.move((200 - 40) // 2, self._flip_pills_h + self._sprite_rest_y)
+
         def _update_window_size(self):
             total_pills_h = 0
             for i in range(self._container_layout.count()):
@@ -723,6 +740,7 @@ def run_daemon():
             rows_h = self._session_rows_container.height() if self._session_rows_visible else 0
             total_h = self._sprite_h + rows_h + total_pills_h
             self.setFixedHeight(max(total_h, self._sprite_h + 10))
+            self._apply_flip_layout(total_pills_h, rows_h)
 
         def _update_window_size_for_pill(self, pill):
             """Resize window after a single pill's internal height changed, without touching other pills."""
@@ -739,6 +757,7 @@ def run_daemon():
             rows_h = self._session_rows_container.height() if self._session_rows_visible else 0
             total_h = self._sprite_h + rows_h + total_pills_h
             self.setFixedHeight(max(total_h, self._sprite_h + 10))
+            self._apply_flip_layout(total_pills_h, rows_h)
 
         # ── Sessions ───────────────────────────────────────────────────────────
 
@@ -1016,11 +1035,10 @@ def run_daemon():
                 screen = QApplication.primaryScreen().geometry()
                 self._base_y = 80
                 self._base_x = screen.width() - self.width() - 20
-            self.move(self._base_x, self._base_y)
+            self._reanchor()
 
         def _reanchor(self):
-            # Keep user's x; only re-apply position after height changes
-            self.move(self._base_x, self._base_y)
+            self.move(self._base_x, self._base_y - self._flip_pills_h)
 
         def mousePressEvent(self, event):
             if event.button() == Qt.MouseButton.LeftButton:
@@ -1034,7 +1052,8 @@ def run_daemon():
             if self._drag_offset is not None and event.buttons() == Qt.MouseButton.LeftButton:
                 new_pos = event.globalPosition().toPoint() - self._drag_offset
                 self._base_x = new_pos.x()
-                self._base_y = new_pos.y()
+                # _base_y is the sprite anchor; add current flip offset so sprite tracks the drag
+                self._base_y = new_pos.y() + self._flip_pills_h
                 self.move(new_pos)
                 event.accept()
                 return
@@ -1051,6 +1070,8 @@ def run_daemon():
         def mouseReleaseEvent(self, event):
             if self._drag_offset is not None:
                 self._drag_offset = None
+                self._update_window_size()  # recompute flip layout for new position
+                self._reanchor()
                 self._save_position()
                 event.accept()
                 return
@@ -1111,6 +1132,7 @@ def run_daemon():
 
         def do_hide(self):
             self._bob_timer.stop()
+            self._flip_pills_h = 0
             self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
             self._requests = []
             self._current_index = 0
@@ -1172,6 +1194,7 @@ def run_daemon():
             if self._session_rows_visible:
                 self._hide_session_rows()
             self._bob_timer.stop()
+            self._flip_pills_h = 0
             self.sprite.show_rope = False
             self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
             self.sprite.update()
