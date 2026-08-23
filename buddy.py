@@ -696,7 +696,7 @@ def run_daemon():
             self._ns_monitor = None
             self._sessions_enabled = not os.path.exists(os.path.expanduser("~/.nudge-sessions-disabled"))
             self._idle_visible = os.path.exists(os.path.expanduser("~/.nudge-idle-visible"))
-            self._thinking_sessions: set = set()
+            self._thinking_sessions: dict = {}  # session_id → start_time float
             self._flip_pills_h = 0  # extra Y offset added to sprite when pills are shown above it
 
             # --- Sprite ---
@@ -1003,6 +1003,22 @@ def run_daemon():
 
         def _cleanup_stale_requests(self):
             """Remove requests whose notify.sh process has exited."""
+            # Prune thinking sessions whose Stop hook never fired.
+            # Fast path: session ended but thinking_stop didn't fire.
+            # Slow path: Stop hook silently failed — 10-min watchdog.
+            stale_thinking = [
+                sid for sid, t in self._thinking_sessions.items()
+                if (self._sessions and sid not in self._sessions)
+                or time.time() - t > 600
+            ]
+            for sid in stale_thinking:
+                self._thinking_sessions.pop(sid, None)
+            if stale_thinking and not self._thinking_sessions and not self._requests:
+                if self._idle_visible and self._session_count > 0:
+                    self._show_idle()
+                elif self.isVisible():
+                    self.do_hide()
+
             if not self._requests:
                 return
             stale = []
@@ -1268,7 +1284,7 @@ def run_daemon():
             self._session_count = max(0, self._session_count - 1)
             if session_id and session_id in self._sessions:
                 del self._sessions[session_id]
-            self._thinking_sessions.discard(session_id)
+            self._thinking_sessions.pop(session_id, None)
             if self._session_rows_visible:
                 self._rebuild_session_rows()
             if session_id:
@@ -1310,7 +1326,7 @@ def run_daemon():
 
         def on_thinking_start(self, session_id: str):
             if session_id:
-                self._thinking_sessions.add(session_id)
+                self._thinking_sessions[session_id] = time.time()
             if self._requests:
                 return  # approval in progress — flag stays, don't start rope
             self.sprite.show_rope = True
@@ -1334,7 +1350,7 @@ def run_daemon():
                 QTimer.singleShot(100, self._pin_to_all_spaces)
 
         def on_thinking_stop(self, session_id: str):
-            self._thinking_sessions.discard(session_id)
+            self._thinking_sessions.pop(session_id, None)
             if self._thinking_sessions:
                 return  # other sessions still thinking
             if self._requests:
