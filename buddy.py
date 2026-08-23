@@ -134,6 +134,9 @@ def run_daemon():
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self._rope_angle = 0.0
             self.show_rope = True
+            self._flag_angle = 0.0
+            self.show_flag = False
+            self._flag_color = QColor(0xff, 0xaa, 0x00)
 
         def hit_rect(self):
             """Tight rect covering just the character body (excludes transparent rope area above)."""
@@ -146,6 +149,14 @@ def run_daemon():
 
         def set_rope_angle(self, angle: float):
             self._rope_angle = angle
+            self.update()
+
+        def set_flag_angle(self, angle: float):
+            self._flag_angle = angle
+            self.update()
+
+        def set_flag_color(self, hex_color: str):
+            self._flag_color = QColor(hex_color)
             self.update()
 
         def _build_silhouette(self, unit: float) -> QPainterPath:
@@ -170,6 +181,42 @@ def run_daemon():
             path = QPainterPath()
             path.addRect(QRectF(10.0 * unit, 2.5 * unit, 1.0 * unit, 1.0 * unit))
             return path
+
+        def _draw_flag(self, painter: QPainter, unit: float):
+            import math
+            px = 13.5 * unit
+            arm_y = 3.5 * unit
+            pole_top_y = arm_y - 9.0 * unit
+
+            pole_pen = QPen(QColor(0xCC, 0xCC, 0xCC))
+            pole_pen.setWidthF(unit * 0.7)
+            pole_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pole_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(QPointF(px, arm_y), QPointF(px, pole_top_y))
+
+            flag_w = 8.0 * unit
+            flag_h = 4.0 * unit
+            wave = math.sin(self._flag_angle) * unit * 2.0
+
+            path = QPainterPath()
+            path.moveTo(QPointF(px, pole_top_y))
+            path.lineTo(QPointF(px, pole_top_y + flag_h))
+            path.quadTo(
+                QPointF(px - flag_w * 0.55, pole_top_y + flag_h * 0.55 + wave),
+                QPointF(px - flag_w, pole_top_y + flag_h * 0.5 + wave)
+            )
+            path.closeSubpath()
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self._flag_color)
+            painter.drawPath(path)
+
+            edge_pen = QPen(QColor(255, 255, 255, 40))
+            edge_pen.setWidthF(unit * 0.15)
+            painter.setPen(edge_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
 
         def _draw_rope(self, painter: QPainter, unit: float):
             import math
@@ -238,6 +285,8 @@ def run_daemon():
 
             if self.show_rope:
                 self._draw_rope(painter, unit)
+            if self.show_flag:
+                self._draw_flag(painter, unit)
 
             painter.end()
 
@@ -691,7 +740,7 @@ def run_daemon():
             self._badge.hide()
             self._badge.raise_()
 
-            # Bob animation
+            # Bob animation (thinking state — rope only)
             import math
             self._bob_tick = 0
             self._bob_timer = QTimer()
@@ -700,6 +749,16 @@ def run_daemon():
                 self._bob_tick += 1
                 self.sprite.set_rope_angle(self._bob_tick * 0.12)
             self._bob_timer.timeout.connect(_bob_step)
+
+            # Flag animation (approval state)
+            self._flag_tick = 0
+            self._flag_rate = 0.13
+            self._flag_timer = QTimer()
+            self._flag_timer.setInterval(30)
+            def _flag_step():
+                self._flag_tick += 1
+                self.sprite.set_flag_angle(self._flag_tick * self._flag_rate)
+            self._flag_timer.timeout.connect(_flag_step)
 
             # Staleness timer
             self._stale_timer = QTimer()
@@ -1005,7 +1064,9 @@ def run_daemon():
                 self._requests.pop(i)
             if not self._requests:
                 if self._thinking_sessions:
-                    pass  # keep bob running — Claude still thinking
+                    self._container.hide()
+                    self._badge.hide()
+                    self._transition_to_rope()
                 elif self._idle_visible and self._session_count > 0:
                     self._show_idle()
                 else:
@@ -1104,6 +1165,45 @@ def run_daemon():
             else:
                 self._show_session_rows()
 
+        # ── Animation helpers ──────────────────────────────────────────────────
+
+        def _highest_risk(self):
+            priority = {"high": 2, "medium": 1, "low": 0}
+            best = "medium"
+            for req in self._requests:
+                risk = req.get("risk", "medium")
+                if priority.get(risk, 1) > priority.get(best, 1):
+                    best = risk
+            return best
+
+        def _start_flag_animation(self):
+            self._bob_timer.stop()
+            self.sprite.show_rope = False
+            risk = self._highest_risk()
+            self.sprite.set_flag_color(RISK_COLORS[risk]["border"])
+            self._flag_rate = 0.20 if risk == "high" else 0.13
+            self.sprite.show_flag = True
+            self.sprite.update()
+            if not self._flag_timer.isActive():
+                self._flag_tick = 0
+                self._flag_timer.start()
+
+        def _stop_flag_animation(self):
+            self._flag_timer.stop()
+            self.sprite.show_flag = False
+            self.sprite.update()
+
+        def _transition_to_rope(self):
+            """Last approval resolved while thinking — switch flag back to rope."""
+            self._stop_flag_animation()
+            self.sprite.show_rope = True
+            self.sprite.update()
+            if not self._bob_timer.isActive():
+                self._bob_tick = 0
+                self._bob_timer.start()
+            self._update_window_size()
+            self._reanchor()
+
         def do_show(self, payload: dict):
             # Hide session rows when an approval arrives so the pill takes priority.
             if self._session_rows_visible:
@@ -1122,7 +1222,6 @@ def run_daemon():
             self._requests.append(payload)
             if was_empty:
                 self._current_index = 0
-                self.sprite.show_rope = True
                 self._container.show()
                 if not self.isVisible():
                     self._position_window()
@@ -1135,13 +1234,18 @@ def run_daemon():
                         win.orderFrontRegardless()
                 except Exception as e:
                     print(f"[buddy] orderFrontRegardless failed: {e}", file=sys.stderr)
-                if not self._bob_timer.isActive():
-                    self._bob_tick = 0
-                    self._bob_timer.start()
+                self._start_flag_animation()
+            else:
+                # Additional request — update flag color if risk escalated
+                risk = self._highest_risk()
+                self.sprite.set_flag_color(RISK_COLORS[risk]["border"])
+                self._flag_rate = 0.20 if risk == "high" else 0.13
             self._rebuild_sessions()
 
         def do_hide(self):
             self._bob_timer.stop()
+            self._flag_timer.stop()
+            self.sprite.show_flag = False
             self._flip_pills_h = 0
             self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
             self._requests = []
@@ -1181,7 +1285,9 @@ def run_daemon():
                             pass
             if not self._requests:
                 if self._thinking_sessions:
-                    pass  # another session still thinking — keep bob running
+                    self._container.hide()
+                    self._badge.hide()
+                    self._transition_to_rope()
                 elif self._idle_visible and self._session_count > 0:
                     self._show_idle()
                 else:
@@ -1205,6 +1311,8 @@ def run_daemon():
         def on_thinking_start(self, session_id: str):
             if session_id:
                 self._thinking_sessions.add(session_id)
+            if self._requests:
+                return  # approval in progress — flag stays, don't start rope
             self.sprite.show_rope = True
             self.sprite.update()
             if not self._bob_timer.isActive():
@@ -1230,7 +1338,7 @@ def run_daemon():
             if self._thinking_sessions:
                 return  # other sessions still thinking
             if self._requests:
-                return  # approval pending — keep bob running
+                return  # approval pending — keep flag running
             self._bob_timer.stop()
             self.sprite.show_rope = False
             self.sprite.update()
@@ -1246,6 +1354,8 @@ def run_daemon():
             if self._session_rows_visible:
                 self._hide_session_rows()
             self._bob_timer.stop()
+            self._flag_timer.stop()
+            self.sprite.show_flag = False
             self._flip_pills_h = 0
             self.sprite.show_rope = False
             self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
@@ -1298,11 +1408,11 @@ def run_daemon():
 
         def _on_active_pill_expand_changed(self, expanded: bool):
             if expanded:
-                self._bob_timer.stop()
+                self._flag_timer.stop()
                 self.sprite.move((200 - 40) // 2, self._sprite_rest_y)
             else:
-                self._bob_tick = 0
-                self._bob_timer.start()
+                self._flag_tick = 0
+                self._flag_timer.start()
             self._update_window_size()
             self._reanchor()
 
@@ -1312,14 +1422,18 @@ def run_daemon():
                     self._requests.pop(i)
                     if not self._requests:
                         if self._thinking_sessions:
-                            self._rebuild_sessions()
                             self._container.hide()
                             self._badge.hide()
+                            self._transition_to_rope()
                         elif self._idle_visible and self._session_count > 0:
                             self._show_idle()
                         else:
                             self.do_hide()
                         return
+                    # More requests remain — update flag color in case risk changed
+                    risk = self._highest_risk()
+                    self.sprite.set_flag_color(RISK_COLORS[risk]["border"])
+                    self._flag_rate = 0.20 if risk == "high" else 0.13
                     self._current_index = min(self._current_index, len(self._requests) - 1)
                     self._rebuild_sessions()
                     return
@@ -1332,9 +1446,9 @@ def run_daemon():
                     self._requests.pop(i)
                     if not self._requests:
                         if self._thinking_sessions:
-                            self._rebuild_sessions()
                             self._container.hide()
                             self._badge.hide()
+                            self._transition_to_rope()
                         elif self._idle_visible and self._session_count > 0:
                             self._show_idle()
                         else:
