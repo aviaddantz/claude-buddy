@@ -71,6 +71,8 @@ def run_daemon():
         session_end_signal = pyqtSignal(str)  # carries session_id
         set_idle_visible_signal = pyqtSignal(bool)
         set_sessions_enabled_signal = pyqtSignal(bool)
+        thinking_start_signal = pyqtSignal(str)  # carries session_id
+        thinking_stop_signal = pyqtSignal(str)   # carries session_id
 
         def run(self):
             if os.path.exists(SOCKET_PATH):
@@ -109,6 +111,10 @@ def run_daemon():
                         self.set_idle_visible_signal.emit(bool(msg.get("value", False)))
                     elif cmd == "set_sessions_enabled":
                         self.set_sessions_enabled_signal.emit(bool(msg.get("value", True)))
+                    elif cmd == "thinking_start":
+                        self.thinking_start_signal.emit(msg.get("session_id", ""))
+                    elif cmd == "thinking_stop":
+                        self.thinking_stop_signal.emit(msg.get("session_id", ""))
                 except Exception:
                     pass
 
@@ -641,6 +647,7 @@ def run_daemon():
             self._ns_monitor = None
             self._sessions_enabled = not os.path.exists(os.path.expanduser("~/.nudge-sessions-disabled"))
             self._idle_visible = os.path.exists(os.path.expanduser("~/.nudge-idle-visible"))
+            self._thinking_sessions: set = set()
             self._flip_pills_h = 0  # extra Y offset added to sprite when pills are shown above it
 
             # --- Sprite ---
@@ -1154,6 +1161,7 @@ def run_daemon():
             self._session_count = max(0, self._session_count - 1)
             if session_id and session_id in self._sessions:
                 del self._sessions[session_id]
+            self._thinking_sessions.discard(session_id)
             if self._session_rows_visible:
                 self._rebuild_session_rows()
             if session_id:
@@ -1169,7 +1177,9 @@ def run_daemon():
                         except OSError:
                             pass
             if not self._requests:
-                if self._idle_visible and self._session_count > 0:
+                if self._thinking_sessions:
+                    pass  # another session still thinking — keep bob running
+                elif self._idle_visible and self._session_count > 0:
                     self._show_idle()
                 else:
                     self.do_hide()
@@ -1189,8 +1199,47 @@ def run_daemon():
             if not value and self._session_rows_visible:
                 self._hide_session_rows()
 
+        def on_thinking_start(self, session_id: str):
+            if session_id:
+                self._thinking_sessions.add(session_id)
+            self.sprite.show_rope = True
+            self.sprite.update()
+            if not self._bob_timer.isActive():
+                self._bob_tick = 0
+                self._bob_timer.start()
+            if not self.isVisible():
+                saved_x, saved_y = self._load_saved_position()
+                if saved_x is not None:
+                    self._base_x = saved_x
+                    self._base_y = saved_y
+                else:
+                    screen = QApplication.primaryScreen().geometry()
+                    self._base_y = 80
+                    self._base_x = screen.width() - self.width() - 20
+                self.setFixedHeight(self._sprite_h + 10)
+                self.move(self._base_x, self._base_y)
+                self.show()
+                self._pin_to_all_spaces()
+                QTimer.singleShot(100, self._pin_to_all_spaces)
+
+        def on_thinking_stop(self, session_id: str):
+            self._thinking_sessions.discard(session_id)
+            if self._thinking_sessions:
+                return  # other sessions still thinking
+            if self._requests:
+                return  # approval pending — keep bob running
+            self._bob_timer.stop()
+            self.sprite.show_rope = False
+            self.sprite.update()
+            if self._idle_visible and self._session_count > 0:
+                self._show_idle()
+            else:
+                self.do_hide()
+
         def _show_idle(self):
             """Show widget in idle state: sprite only, no pills, no rope, no animation."""
+            if self._thinking_sessions:
+                return
             if self._session_rows_visible:
                 self._hide_session_rows()
             self._bob_timer.stop()
@@ -1608,6 +1657,8 @@ end tell
     server_thread.session_end_signal.connect(window.on_session_end)  # str session_id
     server_thread.set_idle_visible_signal.connect(window.on_set_idle_visible)
     server_thread.set_sessions_enabled_signal.connect(window.on_set_sessions_enabled)
+    server_thread.thinking_start_signal.connect(window.on_thinking_start)
+    server_thread.thinking_stop_signal.connect(window.on_thinking_stop)
     server_thread.daemon = True
     server_thread.start()
 
