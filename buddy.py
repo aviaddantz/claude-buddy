@@ -1298,7 +1298,7 @@ def run_daemon():
 
         def on_set_idle_visible(self, value: bool):
             self._idle_visible = value
-            if value and not self._requests and not self.isVisible():
+            if value and not self._requests:
                 self._show_idle()
             elif not value and self.isVisible() and not self._requests:
                 self.do_hide()
