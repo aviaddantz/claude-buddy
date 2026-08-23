@@ -926,7 +926,9 @@ def run_daemon():
                 self._ns_monitor = None
             if self._requests:
                 return  # approval pills are showing, leave widget as-is
-            if self._idle_visible and self._session_count > 0:
+            if self._thinking_sessions:
+                pass  # keep bob running — Claude still thinking
+            elif self._idle_visible and self._session_count > 0:
                 self._show_idle()
             else:
                 self.do_hide()
@@ -1004,7 +1006,9 @@ def run_daemon():
             for i in reversed(stale):
                 self._requests.pop(i)
             if not self._requests:
-                if self._idle_visible and self._session_count > 0:
+                if self._thinking_sessions:
+                    pass  # keep bob running — Claude still thinking
+                elif self._idle_visible and self._session_count > 0:
                     self._show_idle()
                 else:
                     self.do_hide()
@@ -1133,8 +1137,9 @@ def run_daemon():
                         win.orderFrontRegardless()
                 except Exception as e:
                     print(f"[buddy] orderFrontRegardless failed: {e}", file=sys.stderr)
-                self._bob_tick = 0
-                self._bob_timer.start()
+                if not self._bob_timer.isActive():
+                    self._bob_tick = 0
+                    self._bob_timer.start()
             self._rebuild_sessions()
 
         def do_hide(self):
@@ -1308,7 +1313,9 @@ def run_daemon():
                 if req.get("pipe", "") == pipe:
                     self._requests.pop(i)
                     if not self._requests:
-                        if self._idle_visible and self._session_count > 0:
+                        if self._thinking_sessions:
+                            pass  # keep bob running — Claude still thinking
+                        elif self._idle_visible and self._session_count > 0:
                             self._show_idle()
                         else:
                             self.do_hide()
@@ -1324,7 +1331,9 @@ def run_daemon():
                 if req.get("pipe", "") == pipe_path:
                     self._requests.pop(i)
                     if not self._requests:
-                        if self._idle_visible and self._session_count > 0:
+                        if self._thinking_sessions:
+                            pass  # keep bob running — Claude still thinking
+                        elif self._idle_visible and self._session_count > 0:
                             self._show_idle()
                         else:
                             self.do_hide()
