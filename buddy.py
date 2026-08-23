@@ -364,15 +364,14 @@ def run_daemon():
             self._source_label.setVisible(bool(cwd))
             pill_layout.addWidget(self._source_label)
 
-            # Intent (elided when collapsed, full word-wrap when expanded)
+            # Intent (elided — full text shown in expanded_widget when open)
             intent = req.get("intent", "Waiting for approval")
-            self._intent_full = intent
             self._intent_label = QLabel()
             self._intent_label.setStyleSheet(
                 f"font-size: 12px; color: {colors['text']}; padding: 0px; margin: 0px;"
             )
-            self._intent_label.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop)
-            self._intent_label.setMaximumHeight(18)
+            self._intent_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._intent_label.setFixedHeight(18)
             self._intent_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             fm = self._intent_label.fontMetrics()
             # Elide at word boundary instead of mid-character
@@ -383,7 +382,6 @@ def run_daemon():
                 boundary = intent[:cut_len].rfind(" ")
                 if boundary > 0:
                     elided = intent[:boundary] + "\u2026"
-            self._intent_elided = elided
             self._intent_label.setText(elided)
             pill_layout.addWidget(self._intent_label)
 
@@ -392,8 +390,17 @@ def run_daemon():
             self._expanded_widget = QWidget()
             self._expanded_widget.setVisible(self._expanded)
             exp_layout = QVBoxLayout(self._expanded_widget)
-            exp_layout.setContentsMargins(0, 8, 0, 0)
+            exp_layout.setContentsMargins(0, 4, 0, 0)
             exp_layout.setSpacing(8)
+
+            # Full intent shown when expanded (replaces the elided label above)
+            self._intent_full_label = QLabel(intent)
+            self._intent_full_label.setStyleSheet(
+                f"font-size: 12px; color: {colors['text']}; padding: 0px; margin: 0px;"
+            )
+            self._intent_full_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._intent_full_label.setWordWrap(True)
+            exp_layout.addWidget(self._intent_full_label)
 
             divider = QFrame()
             divider.setFrameShape(QFrame.Shape.HLine)
@@ -548,15 +555,8 @@ def run_daemon():
 
         def toggle_expand(self):
             self._expanded = not self._expanded
+            self._intent_label.setVisible(not self._expanded)
             self._expanded_widget.setVisible(self._expanded)
-            if self._expanded:
-                self._intent_label.setMaximumHeight(200)
-                self._intent_label.setWordWrap(True)
-                self._intent_label.setText(self._intent_full)
-            else:
-                self._intent_label.setWordWrap(False)
-                self._intent_label.setMaximumHeight(18)
-                self._intent_label.setText(self._intent_elided)
             self._pill_bg.adjustSize()
             self.adjustSize()
             self.expand_changed.emit(self._expanded)
