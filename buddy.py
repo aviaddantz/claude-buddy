@@ -998,15 +998,16 @@ def run_daemon():
         def _cleanup_stale_requests(self):
             """Remove requests whose notify.sh process has exited."""
             # Prune thinking sessions whose Stop hook never fired.
-            # Fast path: session ended but thinking_stop didn't fire.
-            # Slow path: Stop hook silently failed — 45s watchdog.
-            # PreToolUse refreshes the timestamp on every tool call, so 45s
-            # only triggers after the last tool call is done and the response
-            # has been generating for 45s without a thinking_stop arriving.
+            # Fast path: session ended (sid left _sessions) but thinking_stop
+            # didn't fire — reliable when session tracking works.
+            # Slow path: session tracking unavailable — 5-min last-resort.
+            # Do NOT time out sessions that are still in _sessions: Claude can
+            # generate a long response with zero tool calls, so the PreToolUse
+            # keepalive never fires and the timestamp grows stale while still active.
             stale_thinking = [
                 sid for sid, t in self._thinking_sessions.items()
                 if (self._sessions and sid not in self._sessions)
-                or time.time() - t > 45
+                or (not self._sessions and time.time() - t > 300)
             ]
             for sid in stale_thinking:
                 self._thinking_sessions.pop(sid, None)
