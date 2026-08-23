@@ -53,7 +53,7 @@ struct NudgeApp: App {
                 set: { _ in daemon.toggleAutoApproveLow() }
             ))
 
-            Toggle("Show when idle", isOn: Binding(
+            Toggle("Always show", isOn: Binding(
                 get: { daemon.idleVisible },
                 set: { _ in daemon.toggleIdleVisible() }
             ))
