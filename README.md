@@ -11,7 +11,8 @@ An always-on-top approval widget for Claude Code on macOS. When Claude Code requ
 * Plain-English intent — know what Claude is doing before you approve
 * Approve, Always Allow, Deny, or jump to the terminal session
 * Auto-approves low-risk operations (reads, fetches, ls) — configurable
-* Menu bar app for Pause/Resume, Restart, and Launch at Login
+* Thinking state: Claude sprite bobs on a rope while processing — rope stays live across the full agentic session
+* Menu bar app for Pause/Resume, Restart, Always Show, and Launch at Login
 * Supports multiple simultaneous Claude Code sessions
 
 ## Requirements
@@ -36,19 +37,22 @@ cp -r Nudge.app /Applications/
 open /Applications/Nudge.app
 ```
 
-Add the `PermissionRequest` hook to `~/.claude/settings.json`:
+Add the Nudge hooks to `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
-    "PermissionRequest": [
-      { "command": "bash ~/Development/nudge/notify.sh approval" }
-    ]
+    "SessionStart":      [{ "type": "command", "command": "bash ~/Development/nudge/notify.sh session_start" }],
+    "SessionEnd":        [{ "type": "command", "command": "bash ~/Development/nudge/notify.sh session_end" }],
+    "UserPromptSubmit":  [{ "type": "command", "command": "bash ~/Development/nudge/notify.sh thinking_start" }],
+    "PreToolUse":        [{ "type": "command", "command": "bash ~/Development/nudge/notify.sh thinking_start" }],
+    "Stop":              [{ "type": "command", "command": "bash ~/Development/nudge/notify.sh thinking_stop" }],
+    "PermissionRequest": [{ "type": "command", "command": "bash ~/Development/nudge/notify.sh approval" }]
   }
 }
 ```
 
-Nudge.app starts the daemon on launch and registers itself as a Login Item so the daemon starts automatically at login.
+Nudge.app starts the daemon on launch and registers itself as a Login Item so the daemon starts automatically at login. The `SessionStart` hook also ensures the daemon is running at the start of each Claude Code session.
 
 ## Menu bar
 
@@ -58,10 +62,12 @@ Click the Nudge icon in the menu bar to:
 * **Restart** — restart the daemon
 * **Test Nudge** — fire a test pill to verify everything is working
 * **Auto-approve safe operations** — toggle silent approval for low-risk tools (reads, fetches, ls). On by default.
+* **Always show** — keep the widget visible at all times (thinking state and idle), not just when an approval is pending.
 * **Launch at Login** — register Nudge.app as a Login Item
 
 ## How it works
 
+**Approval flow** (PermissionRequest):
 ```
 Claude Code  →  PermissionRequest hook  →  notify.sh  →  Unix socket  →  buddy.py daemon
                                                                                   ↓
@@ -71,6 +77,14 @@ Claude Code  →  PermissionRequest hook  →  notify.sh  →  Unix socket  → 
 `notify.sh` reads the permission request, classifies the tool into a risk level and intent string, and sends it to the daemon. The daemon shows the chip. On Approve/Deny the decision is written back to Claude Code via the named pipe.
 
 Low-risk tools (reads, fetches, ls, grep) are auto-approved by `notify.sh` without reaching the daemon, unless auto-approve is disabled in the menu bar.
+
+**Thinking state** (rope animation):
+```
+UserPromptSubmit / PreToolUse  →  notify.sh thinking_start  →  daemon  →  rope animation
+Stop                           →  notify.sh thinking_stop   →  daemon  →  animation stops
+```
+
+When Claude starts processing (`UserPromptSubmit`) and before each tool call (`PreToolUse`), the sprite bobs on a rope. `PreToolUse` acts as a keepalive so the rope stays continuous across multi-step agentic sessions. `Stop` fires after each response, stopping the animation. `SessionEnd` cleans up session state.
 
 Logs: `/tmp/claude-buddy.log`
 

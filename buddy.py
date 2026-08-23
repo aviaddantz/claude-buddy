@@ -999,11 +999,14 @@ def run_daemon():
             """Remove requests whose notify.sh process has exited."""
             # Prune thinking sessions whose Stop hook never fired.
             # Fast path: session ended but thinking_stop didn't fire.
-            # Slow path: Stop hook silently failed — 10-min watchdog.
+            # Slow path: Stop hook silently failed — 45s watchdog.
+            # PreToolUse refreshes the timestamp on every tool call, so 45s
+            # only triggers after the last tool call is done and the response
+            # has been generating for 45s without a thinking_stop arriving.
             stale_thinking = [
                 sid for sid, t in self._thinking_sessions.items()
                 if (self._sessions and sid not in self._sessions)
-                or time.time() - t > 600
+                or time.time() - t > 45
             ]
             for sid in stale_thinking:
                 self._thinking_sessions.pop(sid, None)
@@ -1344,7 +1347,13 @@ def run_daemon():
                 QTimer.singleShot(100, self._pin_to_all_spaces)
 
         def on_thinking_stop(self, session_id: str):
-            self._thinking_sessions.pop(session_id, None)
+            if session_id:
+                self._thinking_sessions.pop(session_id, None)
+            else:
+                # Stop hook fired but session_id was unparseable — clear all.
+                # Can't be precise with no id; clearing is safe because a
+                # concurrent session's next PreToolUse will restart the rope.
+                self._thinking_sessions.clear()
             if self._thinking_sessions:
                 return  # other sessions still thinking
             if self._requests:
