@@ -18,6 +18,7 @@ docs/superpowers/
 test-*.txt
 
 # Local project artifacts
+docs/backlog.md
 docs/design-comparison.html
 docs/2026-04-05-buddy-approval-ui-design.md
 CLAUDE.md
