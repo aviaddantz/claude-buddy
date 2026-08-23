@@ -364,14 +364,15 @@ def run_daemon():
             self._source_label.setVisible(bool(cwd))
             pill_layout.addWidget(self._source_label)
 
-            # Intent (compact, elided)
+            # Intent (elided when collapsed, full word-wrap when expanded)
             intent = req.get("intent", "Waiting for approval")
+            self._intent_full = intent
             self._intent_label = QLabel()
             self._intent_label.setStyleSheet(
                 f"font-size: 12px; color: {colors['text']}; padding: 0px; margin: 0px;"
             )
-            self._intent_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._intent_label.setFixedHeight(18)
+            self._intent_label.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop)
+            self._intent_label.setMaximumHeight(18)
             self._intent_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             fm = self._intent_label.fontMetrics()
             # Elide at word boundary instead of mid-character
@@ -382,6 +383,7 @@ def run_daemon():
                 boundary = intent[:cut_len].rfind(" ")
                 if boundary > 0:
                     elided = intent[:boundary] + "\u2026"
+            self._intent_elided = elided
             self._intent_label.setText(elided)
             pill_layout.addWidget(self._intent_label)
 
@@ -418,7 +420,7 @@ def run_daemon():
                 toggle_lbl.setStyleSheet(
                     "font-size: 10px; color: #444; padding: 0px; margin: 0px;"
                 )
-                toggle_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+                toggle_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 toggle_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
                 toggle_lbl.setFixedHeight(14)
                 exp_layout.addWidget(toggle_lbl)
@@ -547,6 +549,14 @@ def run_daemon():
         def toggle_expand(self):
             self._expanded = not self._expanded
             self._expanded_widget.setVisible(self._expanded)
+            if self._expanded:
+                self._intent_label.setMaximumHeight(200)
+                self._intent_label.setWordWrap(True)
+                self._intent_label.setText(self._intent_full)
+            else:
+                self._intent_label.setWordWrap(False)
+                self._intent_label.setMaximumHeight(18)
+                self._intent_label.setText(self._intent_elided)
             self._pill_bg.adjustSize()
             self.adjustSize()
             self.expand_changed.emit(self._expanded)
