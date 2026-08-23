@@ -698,8 +698,6 @@ def run_daemon():
             self._bob_timer.setInterval(30)
             def _bob_step():
                 self._bob_tick += 1
-                offset = int(BOB_AMP * math.sin(self._bob_tick * 0.12))
-                self.sprite.move((200 - SPRITE_W) // 2, self._flip_pills_h + self._sprite_rest_y - offset)
                 self.sprite.set_rope_angle(self._bob_tick * 0.12)
             self._bob_timer.timeout.connect(_bob_step)
 
@@ -1314,7 +1312,9 @@ def run_daemon():
                     self._requests.pop(i)
                     if not self._requests:
                         if self._thinking_sessions:
-                            pass  # keep bob running — Claude still thinking
+                            self._rebuild_sessions()
+                            self._container.hide()
+                            self._badge.hide()
                         elif self._idle_visible and self._session_count > 0:
                             self._show_idle()
                         else:
@@ -1332,7 +1332,9 @@ def run_daemon():
                     self._requests.pop(i)
                     if not self._requests:
                         if self._thinking_sessions:
-                            pass  # keep bob running — Claude still thinking
+                            self._rebuild_sessions()
+                            self._container.hide()
+                            self._badge.hide()
                         elif self._idle_visible and self._session_count > 0:
                             self._show_idle()
                         else:
