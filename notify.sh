@@ -170,6 +170,38 @@ if [ "$MODE" = "sessions_off" ]; then
     exit 0
 fi
 
+if [ "$MODE" = "thinking_start" ]; then
+    _SESSION_ID_THINKING=""
+    if [ ! -t 0 ]; then
+        _SESSION_ID_THINKING=$(cat | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+    fi
+    _send_socket_cmd "{\"cmd\":\"thinking_start\",\"session_id\":\"${_SESSION_ID_THINKING}\"}"
+    exit 0
+fi
+
+if [ "$MODE" = "thinking_stop" ]; then
+    _SESSION_ID_THINKING=""
+    if [ ! -t 0 ]; then
+        _SESSION_ID_THINKING=$(cat | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+    fi
+    _send_socket_cmd "{\"cmd\":\"thinking_stop\",\"session_id\":\"${_SESSION_ID_THINKING}\"}"
+    exit 0
+fi
+
 if [ "$MODE" != "approval" ]; then
     exit 0
 fi
