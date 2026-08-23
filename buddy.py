@@ -403,21 +403,7 @@ def run_daemon():
             tool_input = req.get("tool_input", {})
             raw_cmd = tool_input.get("command", "").strip() if isinstance(tool_input, dict) else ""
             if req.get("tool", "").lower() == "bash" and raw_cmd:
-                # Truncated command — single dim monospace line
-                cmd_short = QLabel(raw_cmd)
-                cmd_short.setStyleSheet(
-                    "font-size: 10px; color: #666; font-family: monospace;"
-                    " padding: 0px; margin: 0px;"
-                )
-                cmd_short.setAlignment(Qt.AlignmentFlag.AlignLeft)
-                cmd_short.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-                cmd_short.setFixedHeight(14)
-                fm_cmd = cmd_short.fontMetrics()
-                elided_cmd = fm_cmd.elidedText(raw_cmd, Qt.TextElideMode.ElideRight, 176)
-                cmd_short.setText(elided_cmd)
-                exp_layout.addWidget(cmd_short)
-
-                # Full command block (hidden by default) — inserted before toggle so toggle stays last
+                # Full command block (hidden by default, shown on demand)
                 cmd_full = QLabel(raw_cmd)
                 cmd_full.setStyleSheet(
                     "font-size: 10px; color: #888; font-family: monospace;"
@@ -427,8 +413,8 @@ def run_daemon():
                 cmd_full.setVisible(False)
                 exp_layout.addWidget(cmd_full)
 
-                # Toggle label — always last, always visible
-                toggle_lbl = QLabel("show full ▾")
+                # Toggle label — always visible in expanded view
+                toggle_lbl = QLabel("show command ▾")
                 toggle_lbl.setStyleSheet(
                     "font-size: 10px; color: #444; padding: 0px; margin: 0px;"
                 )
@@ -438,22 +424,20 @@ def run_daemon():
                 exp_layout.addWidget(toggle_lbl)
 
                 # Wire toggle — resize only this pill via targeted method
-                def _make_toggle(short, full, lbl, pill_ref):
+                def _make_toggle(full, lbl, pill_ref):
                     def _toggle(event):
                         if full.isVisible():
                             full.setVisible(False)
-                            short.setVisible(True)
-                            lbl.setText("show full ▾")
+                            lbl.setText("show command ▾")
                         else:
                             full.setVisible(True)
-                            short.setVisible(False)
-                            lbl.setText("hide full ▴")
+                            lbl.setText("hide command ▴")
                         chip = pill_ref.window()
                         if hasattr(chip, "_update_window_size_for_pill"):
                             chip._update_window_size_for_pill(pill_ref)
                             chip._reanchor()
                     return _toggle
-                toggle_lbl.mousePressEvent = _make_toggle(cmd_short, cmd_full, toggle_lbl, self)
+                toggle_lbl.mousePressEvent = _make_toggle(cmd_full, toggle_lbl, self)
 
             mode = req.get("mode", "approval")
             is_attention = mode == "attention"
