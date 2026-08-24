@@ -67,6 +67,11 @@ warm is 2.6 ms.
 
 ## Desktop navigation: a platform limitation, not a bug
 
+> **Superseded by v46.** The conclusion below — that clicking a desktop row cannot open
+> the conversation — was wrong. No URL can do it, which is what this section establishes
+> correctly, but the accessibility API can. See `v46-desktop-conversation-focus.md`.
+
+
 v31 left clicking a desktop row broken and unexplained. Root cause, from
 `/Applications/Claude.app/Contents/Resources/app.asar`:
 

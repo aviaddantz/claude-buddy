@@ -15,6 +15,7 @@ import json
 import socket
 import subprocess
 import signal
+import threading
 import time
 
 SOCKET_PATH = "/tmp/claude-buddy.sock"
@@ -189,6 +190,165 @@ def _resolve_session_title(sess: dict) -> str:
     if meta.get('prompt'):
         return meta['prompt'][:80]
     return (sess.get('intent') or '').strip()
+
+
+# ── Claude Desktop conversation focus (accessibility) ──────────────────────────
+# There is no URL that opens a specific local conversation: the claude://code handler
+# validates the id against /^(cse|session)_/, which only ever matches cloud sessions, and
+# claude://cowork only handles /new and /shared-artifact. The sidebar rows are reachable
+# through the accessibility API though, so the conversation is opened by pressing its row
+# the same way a person would.
+
+_ax = None  # lazily built {'cf', 'ax', 'true', 'string_type', 'array_type', 'strings'}
+
+
+def _ax_api():
+    """Load the CoreFoundation/accessibility symbols needed to press a sidebar row."""
+    global _ax
+    if _ax is not None:
+        return _ax or None
+    import ctypes
+    import ctypes.util
+    try:
+        cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library('CoreFoundation'))
+        ax = ctypes.cdll.LoadLibrary(ctypes.util.find_library('ApplicationServices'))
+        void, i32, long_, ulong = ctypes.c_void_p, ctypes.c_int, ctypes.c_long, ctypes.c_ulong
+        cf.CFStringCreateWithCString.restype = void
+        cf.CFStringCreateWithCString.argtypes = [void, ctypes.c_char_p, ctypes.c_uint32]
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFStringGetCString.argtypes = [void, ctypes.c_char_p, long_, ctypes.c_uint32]
+        cf.CFArrayGetCount.restype = long_
+        cf.CFArrayGetCount.argtypes = [void]
+        cf.CFArrayGetValueAtIndex.restype = void
+        cf.CFArrayGetValueAtIndex.argtypes = [void, long_]
+        cf.CFGetTypeID.restype = ulong
+        cf.CFGetTypeID.argtypes = [void]
+        cf.CFStringGetTypeID.restype = ulong
+        cf.CFArrayGetTypeID.restype = ulong
+        cf.CFRetain.restype = void
+        cf.CFRetain.argtypes = [void]
+        cf.CFRelease.argtypes = [void]
+        ax.AXUIElementCreateApplication.restype = void
+        ax.AXUIElementCreateApplication.argtypes = [i32]
+        ax.AXUIElementCopyAttributeValue.restype = i32
+        ax.AXUIElementCopyAttributeValue.argtypes = [void, void, ctypes.POINTER(void)]
+        ax.AXUIElementSetAttributeValue.restype = i32
+        ax.AXUIElementSetAttributeValue.argtypes = [void, void, void]
+        ax.AXUIElementPerformAction.restype = i32
+        ax.AXUIElementPerformAction.argtypes = [void, void]
+        ax.AXIsProcessTrusted.restype = ctypes.c_bool
+        _ax = {
+            'ctypes': ctypes, 'cf': cf, 'ax': ax,
+            'true': ctypes.c_void_p.in_dll(cf, 'kCFBooleanTrue'),
+            'string_type': cf.CFStringGetTypeID(),
+            'array_type': cf.CFArrayGetTypeID(),
+            'strings': {},
+        }
+    except Exception as exc:
+        print(f"[buddy] accessibility API unavailable: {exc}", file=sys.stderr)
+        _ax = {}
+        return None
+    return _ax
+
+
+def _ax_cfstr(api, text):
+    cache = api['strings']
+    if text not in cache:
+        cache[text] = api['cf'].CFStringCreateWithCString(None, text.encode(), 0x08000100)
+    return cache[text]
+
+
+def _ax_attr_str(api, element, name):
+    ctypes = api['ctypes']
+    out = ctypes.c_void_p()
+    if api['ax'].AXUIElementCopyAttributeValue(element, _ax_cfstr(api, name), ctypes.byref(out)) != 0:
+        return ''
+    if not out.value or api['cf'].CFGetTypeID(out) != api['string_type']:
+        if out.value:
+            api['cf'].CFRelease(out)
+        return ''
+    buf = ctypes.create_string_buffer(1024)
+    ok = api['cf'].CFStringGetCString(out, buf, 1024, 0x08000100)
+    api['cf'].CFRelease(out)
+    return buf.value.decode('utf-8', 'replace') if ok else ''
+
+
+def _ax_children(api, element):
+    ctypes = api['ctypes']
+    out = ctypes.c_void_p()
+    if api['ax'].AXUIElementCopyAttributeValue(element, _ax_cfstr(api, 'AXChildren'), ctypes.byref(out)) != 0:
+        return []
+    if not out.value or api['cf'].CFGetTypeID(out) != api['array_type']:
+        if out.value:
+            api['cf'].CFRelease(out)
+        return []
+    kids = []
+    for i in range(api['cf'].CFArrayGetCount(out)):
+        # CFArrayGetValueAtIndex returns a borrowed reference, so each child is retained
+        # before the array goes away or the pointers turn stale.
+        child = ctypes.c_void_p(api['cf'].CFArrayGetValueAtIndex(out, i))
+        api['cf'].CFRetain(child)
+        kids.append(child)
+    api['cf'].CFRelease(out)
+    return kids
+
+
+def _ax_find_row(api, element, title, depth=0, budget=None):
+    """Depth-first search for the sidebar row button whose label contains `title`."""
+    if budget is None:
+        budget = [20000]
+    if depth > 40 or budget[0] <= 0:
+        return None
+    budget[0] -= 1
+    if _ax_attr_str(api, element, 'AXRole') == 'AXButton':
+        label = _ax_attr_str(api, element, 'AXTitle')
+        # Rows are labelled "<status> <conversation name>"; the per-row overflow menu is
+        # described "More options for <name>" and must not win the match.
+        if title.lower() in label.lower() and \
+                not _ax_attr_str(api, element, 'AXDescription').startswith('More options'):
+            return element
+    for child in _ax_children(api, element):
+        hit = _ax_find_row(api, child, title, depth + 1, budget)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _focus_desktop_conversation(title: str) -> bool:
+    """Bring Claude forward and open the conversation named `title`. Blocking: call off
+    the Qt main thread."""
+    subprocess.run(["osascript", "-e", 'tell application "Claude" to activate'],
+                   capture_output=True)
+    if not title:
+        return False
+    api = _ax_api()
+    if not api:
+        return False
+    if not api['ax'].AXIsProcessTrusted():
+        print("[buddy] cannot open desktop conversation: this process is not trusted for "
+              "Accessibility. Grant it in System Settings > Privacy & Security > "
+              "Accessibility.", file=sys.stderr)
+        return False
+    try:
+        pid = int(subprocess.check_output(["pgrep", "-x", "Claude"]).split()[0])
+    except Exception:
+        return False
+    app = api['ctypes'].c_void_p(api['ax'].AXUIElementCreateApplication(pid))
+    # Electron only publishes its web content once a client asks for it.
+    api['ax'].AXUIElementSetAttributeValue(app, _ax_cfstr(api, 'AXManualAccessibility'), api['true'])
+    # The window is not in the tree until Claude is actually frontmost, and activation is
+    # not instant, so the search is retried briefly rather than failing on the first pass.
+    for _ in range(12):
+        time.sleep(0.15)
+        row = _ax_find_row(api, app, title)
+        if row is not None:
+            err = api['ax'].AXUIElementPerformAction(row, _ax_cfstr(api, 'AXPress'))
+            if err == 0:
+                return True
+            print(f"[buddy] pressing conversation row failed: AXError {err}", file=sys.stderr)
+            return False
+    print(f"[buddy] conversation {title!r} not found in the Claude sidebar", file=sys.stderr)
+    return False
 
 
 def send_command(cmd: str) -> bool:
@@ -1755,19 +1915,18 @@ end tell
                     subprocess.run(["osascript", "-e", f'tell application "{app}" to activate'], capture_output=True)
                     return
 
-            # 3. No UUID — desktop session. Conversation-level navigation is not available:
-            # the claude://code handler validates the id against /^(cse|session)_/, which
-            # only matches cloud sessions. Local conversations are local_<uuid>, and both
-            # claude://code/local_… and claude://epitaxy/local_… are rejected (verified
-            # against Claude 1.34493.1 — neither updates the record's lastFocusedAt).
-            # Best available action is to bring the app forward.
+            # 3. No UUID — desktop session. No URL opens a specific local conversation, so
+            # the sidebar row is pressed through the accessibility API instead. Activation
+            # plus the retry loop takes up to ~2s, hence the thread.
             if source == "desktop":
                 record = _desktop_records().get(session_id, {})
-                print(f"[buddy] desktop session {session_id}: activating Claude "
-                      f"(no deep link for local conversation "
-                      f"{record.get('session_id', 'unknown')})", file=sys.stderr)
-                if _is_running("Claude"):
-                    subprocess.run(["osascript", "-e", 'tell application "Claude" to activate'], capture_output=True)
+                title = record.get('title') or ''
+                if not title:
+                    sess = self._sessions.get(session_id, {})
+                    title = _resolve_session_title(sess) if sess else ''
+                threading.Thread(
+                    target=_focus_desktop_conversation, args=(title,), daemon=True,
+                ).start()
                 return
 
             # 4. Terminal or unknown: try to find the right iTerm2 tab by CWD
