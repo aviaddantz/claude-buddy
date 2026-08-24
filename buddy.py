@@ -374,13 +374,11 @@ def run_daemon():
             self._intent_label.setFixedHeight(18)
             self._intent_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             fm = self._intent_label.fontMetrics()
-            # Elide at word boundary instead of mid-character
             elided = fm.elidedText(intent, Qt.TextElideMode.ElideRight, 200 - 24)
             if elided != intent and " " in intent:
-                # Qt cut mid-word — find last space before the cut point
                 cut_len = len(elided.rstrip("\u2026"))
                 boundary = intent[:cut_len].rfind(" ")
-                if boundary > 0:
+                if boundary > 0 and boundary >= cut_len * 0.7:
                     elided = intent[:boundary] + "\u2026"
             self._intent_label.setText(elided)
             pill_layout.addWidget(self._intent_label)
@@ -1300,6 +1298,8 @@ def run_daemon():
             if session_id and session_id in self._sessions:
                 del self._sessions[session_id]
             self._thinking_sessions.pop(session_id, None)
+            if not self._sessions:
+                self._thinking_sessions.clear()
             if self._session_rows_visible:
                 self._rebuild_session_rows()
             if session_id:
