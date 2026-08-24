@@ -785,14 +785,19 @@ def run_daemon():
         def _update_mask(self):
             from PyQt6.QtGui import QRegion
             from PyQt6.QtCore import QRect
-            sprite_region = QRegion(QRect(
-                self.sprite.x(), 0,
-                self.sprite.width(), self.sprite.height() + self._sprite_rest_y
-            ))
             has_content = self._container_layout.count() > 0 or self._session_rows_visible
             if not has_content:
-                self.setMask(sprite_region)
+                # Idle/thinking: sprite-only mask
+                r = QRegion(QRect(self.sprite.x(), 0, self.sprite.width(), self.sprite.height() + self._sprite_rest_y))
+                self.setMask(r)
+            elif self._flip_pills_h > 0:
+                # Flip mode: pills at y=0, sprite pushed below them
+                pill_region = QRegion(QRect(0, 0, 200, self._flip_pills_h))
+                sprite_region = QRegion(QRect(self.sprite.x(), self._flip_pills_h, self.sprite.width(), self.sprite.height() + self._sprite_rest_y))
+                self.setMask(pill_region | sprite_region)
             else:
+                # Normal: sprite at top, pills below
+                sprite_region = QRegion(QRect(self.sprite.x(), 0, self.sprite.width(), self.sprite.height() + self._sprite_rest_y))
                 content_h = self.height() - self._sprite_h
                 content_region = QRegion(QRect(0, self._sprite_h, 200, max(content_h, 0)))
                 self.setMask(sprite_region | content_region)
