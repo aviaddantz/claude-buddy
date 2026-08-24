@@ -10,6 +10,7 @@ Usage:
 
 import sys
 import os
+import calendar
 import json
 import socket
 import subprocess
@@ -19,6 +20,175 @@ import time
 SOCKET_PATH = "/tmp/claude-buddy.sock"
 SESSIONS_FILE = os.path.expanduser("~/.nudge-sessions.json")
 SESSIONS_STALE_SECS = 4 * 3600
+# Sessions found by scanning transcripts (rather than registered by the SessionStart hook)
+# have no proof they are still open, so they must look active much more recently.
+SCAN_ACTIVE_SECS = 30 * 60
+
+# Claude Desktop stores one record per Claude Code conversation here. Account and org
+# UUIDs vary per install, hence the glob.
+DESKTOP_RECORDS_GLOB = os.path.expanduser(
+    "~/Library/Application Support/Claude/claude-code-sessions/*/*/local_*.json"
+)
+TRANSCRIPT_TAIL_BYTES = 256 * 1024
+
+
+def _iso_to_epoch(ts: str) -> float:
+    """Parse a transcript timestamp ('2026-08-24T10:54:29.840Z') to epoch seconds."""
+    try:
+        return calendar.timegm(time.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S'))
+    except Exception:
+        return 0.0
+
+
+_meta_cache: dict = {}  # transcript path -> (mtime, meta)
+
+
+def _read_session_meta(transcript_path: str) -> dict:
+    """Return {'title', 'prompt', 'activity'} for a transcript.
+
+    Claude Code appends an 'ai-title'/'custom-title' and a 'last-prompt' entry each turn,
+    so the newest values live at the end of the file. Only the tail is read -- transcripts
+    reach several MB and a full parse would stall the UI on every list open. Results are
+    cached by mtime because titles, liveness and age all need them on the same open.
+    """
+    try:
+        stat = os.stat(transcript_path)
+    except OSError:
+        return {}
+    cached = _meta_cache.get(transcript_path)
+    if cached and cached[0] == stat.st_mtime:
+        return cached[1]
+    try:
+        size = stat.st_size
+        with open(transcript_path, 'rb') as f:
+            if size > TRANSCRIPT_TAIL_BYTES:
+                f.seek(size - TRANSCRIPT_TAIL_BYTES)
+                f.readline()  # discard the partial line the seek landed inside
+            lines = f.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return {}
+
+    meta = {}
+    for line in lines:  # forward scan so the last occurrence wins
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        kind = d.get('type')
+        if kind == 'custom-title' and d.get('customTitle'):
+            meta['custom'] = d['customTitle'].strip()
+        elif kind == 'ai-title' and d.get('aiTitle'):
+            meta['ai'] = d['aiTitle'].strip()
+        elif kind == 'last-prompt' and d.get('lastPrompt'):
+            meta['prompt'] = ' '.join(d['lastPrompt'].split())
+        elif kind in ('user', 'assistant') and d.get('timestamp'):
+            # File mtime is not a usable liveness signal: transcripts get rewritten days
+            # after the conversation ended. The last real turn is.
+            meta['activity'] = _iso_to_epoch(d['timestamp'])
+    result = {
+        'title': meta.get('custom') or meta.get('ai') or '',
+        'prompt': meta.get('prompt', ''),
+        'activity': meta.get('activity', 0.0),
+    }
+    _meta_cache[transcript_path] = (stat.st_mtime, result)
+    return result
+
+
+_desktop_cache: dict = {}       # cli_session_id -> {'session_id', 'title', 'archived'}
+_desktop_cache_seen: dict = {}  # record path -> mtime already parsed
+
+
+def _desktop_records() -> dict:
+    """Map CLI session id -> desktop conversation record.
+
+    Each record carries the desktop's own session id plus the conversation title the user
+    sees in the app. Records embed full MCP tool schemas and there can be hundreds, so
+    only recently-touched files are parsed and results are cached by mtime.
+    """
+    import glob
+    now = time.time()
+    for path in glob.glob(DESKTOP_RECORDS_GLOB):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if now - mtime > SESSIONS_STALE_SECS:
+            continue
+        if _desktop_cache_seen.get(path) == mtime:
+            continue
+        try:
+            with open(path, 'rb') as f:
+                d = json.loads(f.read().decode('utf-8', 'replace'))
+        except Exception:
+            continue
+        _desktop_cache_seen[path] = mtime
+        cli_id = d.get('cliSessionId')
+        if cli_id:
+            _desktop_cache[cli_id] = {
+                'session_id': d.get('sessionId', ''),
+                'title': (d.get('title') or '').strip(),
+                'archived': bool(d.get('isArchived')),
+            }
+    return _desktop_cache
+
+
+def _session_activity(sess: dict) -> float:
+    """Epoch of the session's last real conversation turn, falling back to file mtime."""
+    tp = sess.get('transcript_path', '')
+    if not tp:
+        return 0.0
+    activity = _read_session_meta(tp).get('activity') or 0.0
+    if activity:
+        return activity
+    try:
+        return os.path.getmtime(tp)
+    except OSError:
+        return 0.0
+
+
+def _is_session_dead(sess: dict, now: float, records: dict) -> bool:
+    """Whether a session should drop off the list.
+
+    The session_end hook does not fire when a desktop conversation is closed, and a
+    transcript that merely exists proves nothing, so liveness is inferred from the last
+    real turn. Sessions discovered by scanning get a much shorter leash than ones the
+    SessionStart hook registered, because nothing vouches for them being open.
+    """
+    tp = sess.get('transcript_path', '')
+    if not tp:
+        return True
+    if not os.path.exists(tp):
+        return True  # transcript gone: session is over
+    scanned = bool(sess.get('scanned')) or sess.get('source') == 'unknown'
+    if now - _session_activity(sess) > (SCAN_ACTIVE_SECS if scanned else SESSIONS_STALE_SECS):
+        return True
+    # A scanned transcript with no title was never a conversation -- it is a headless
+    # `claude -p` run from a hook.
+    if scanned and not _read_session_meta(tp).get('title'):
+        return True
+    return bool(records.get(sess.get('session_id', ''), {}).get('archived'))
+
+
+def _resolve_session_title(sess: dict) -> str:
+    """Best available name for a session.
+
+    The desktop record wins because it is what the user sees in the app. The hook-supplied
+    intent is last: for terminal sessions it is the iTerm tab title, which is noise like
+    "* Claude Code".
+    """
+    record = _desktop_records().get(sess.get('session_id', ''))
+    # Scanned sessions have no source. A desktop record naming them settles it, which also
+    # gets their row tag and click target right.
+    if record and sess.get('source') in (None, '', 'unknown'):
+        sess['source'] = 'desktop'
+    if record and record.get('title'):
+        return record['title']
+    meta = _read_session_meta(sess.get('transcript_path', '')) if sess.get('transcript_path') else {}
+    if meta.get('title'):
+        return meta['title']
+    if meta.get('prompt'):
+        return meta['prompt'][:80]
+    return (sess.get('intent') or '').strip()
 
 
 def send_command(cmd: str) -> bool:
@@ -598,13 +768,18 @@ def run_daemon():
             layout.setContentsMargins(8, 0, 8, 0)
             layout.setSpacing(5)
 
-            dot = QWidget()
-            dot.setFixedSize(6, 6)
-            dot.setStyleSheet("background: #4CAF50; border-radius: 3px;")
-            layout.addWidget(dot)
-
             folder = session.get("folder", "?")
-            intent = session.get("intent", "")
+            title = session.get("title", "") or session.get("intent", "")
+
+            # Source tag replaces the old status dot: with several sessions in the same
+            # folder, iTerm-vs-Desktop is what tells the rows apart.
+            tag = "iTerm" if session.get("source") == "terminal" else "Desktop"
+            tag_lbl = QLabel(tag)
+            tag_lbl.setStyleSheet(
+                "color: #6a6a6a; font-size: 9px; font-weight: 600; background: transparent;"
+            )
+            tag_lbl.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+            layout.addWidget(tag_lbl)
 
             folder_lbl = QLabel(folder)
             folder_lbl.setStyleSheet(
@@ -613,21 +788,40 @@ def run_daemon():
             folder_lbl.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
             layout.addWidget(folder_lbl)
 
-            if intent:
-                sep_lbl = QLabel("|")
-                sep_lbl.setStyleSheet("color: #444; font-size: 11px; background: transparent;")
-                sep_lbl.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-                layout.addWidget(sep_lbl)
+            age_lbl = QLabel(self._age_text(session))
+            age_lbl.setStyleSheet("color: #555; font-size: 9px; background: transparent;")
+            age_lbl.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
 
-                intent_lbl = QLabel()
-                intent_lbl.setStyleSheet("color: #777; font-size: 11px; background: transparent;")
-                intent_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-                # Pre-elide to 130px — intent label gets ~130px after folder and sep
-                fm = intent_lbl.fontMetrics()
-                intent_lbl.setText(fm.elidedText(intent, Qt.TextElideMode.ElideRight, 130))
-                layout.addWidget(intent_lbl, 1)
+            if title:
+                title_lbl = QLabel()
+                title_lbl.setStyleSheet("color: #8d8d8d; font-size: 11px; background: transparent;")
+                title_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                title_lbl.setToolTip(title)
+                # Row is 200px wide with 8px margins; the title takes whatever the tag,
+                # folder, age and spacing leave behind.
+                fm = title_lbl.fontMetrics()
+                fixed = (tag_lbl.sizeHint().width() + folder_lbl.sizeHint().width()
+                         + age_lbl.sizeHint().width() + layout.spacing() * 3)
+                avail = max(200 - 16 - fixed, 40)
+                title_lbl.setText(fm.elidedText(title, Qt.TextElideMode.ElideRight, avail))
+                layout.addWidget(title_lbl, 1)
             else:
                 layout.addStretch(1)
+
+            layout.addWidget(age_lbl)
+
+        @staticmethod
+        def _age_text(session: dict) -> str:
+            """Compact time since the session's last real conversation turn."""
+            activity = _session_activity(session)
+            if not activity:
+                return ""
+            mins = int(max(0.0, time.time() - activity) // 60)
+            if mins < 1:
+                return "now"
+            if mins < 60:
+                return f"{mins}m"
+            return f"{mins // 60}h"
 
         def paintEvent(self, event):
             p = QPainter(self)
@@ -689,6 +883,7 @@ def run_daemon():
             self._sessions_enabled = not os.path.exists(os.path.expanduser("~/.nudge-sessions-disabled"))
             self._idle_visible = os.path.exists(os.path.expanduser("~/.nudge-idle-visible"))
             self._thinking_sessions: dict = {}  # session_id → start_time float
+            self._last_prune = 0.0
             self._flip_pills_h = 0  # extra Y offset added to sprite when pills are shown above it
 
             # --- Sprite ---
@@ -885,7 +1080,8 @@ def run_daemon():
                 item = self._session_rows_layout.takeAt(0)
                 if item.widget():
                     item.widget().deleteLater()
-            for session in self._sessions.values():
+
+            for session in sorted(self._sessions.values(), key=_session_activity, reverse=True):
                 row = _SessionRowWidget(session)
                 row.clicked.connect(self._on_session_row_clicked)
                 self._session_rows_layout.addWidget(row)
@@ -902,58 +1098,59 @@ def run_daemon():
                 self._container.move(0, self._sprite_h + rows_h)
                 self._update_window_size()
 
-        def _refresh_session_intents(self):
-            """Re-read intents from transcripts for sessions that still have an empty intent."""
+        def _refresh_session_titles(self):
+            """Re-resolve every session's title. Titles change as a conversation moves on,
+            so this deliberately re-reads sessions that already have one."""
             changed = False
             for sess in self._sessions.values():
-                if sess.get('intent') or not sess.get('transcript_path'):
-                    continue
-                tp = sess['transcript_path']
-                try:
-                    with open(tp, 'r', errors='replace') as f:
-                        for line in f:
-                            try:
-                                d = json.loads(line)
-                                if d.get('type') != 'user':
-                                    continue
-                                content = d.get('message', {}).get('content', '')
-                                text = ''
-                                if isinstance(content, list):
-                                    for c in content:
-                                        if isinstance(c, dict) and c.get('type') == 'text':
-                                            text = c['text'].strip()
-                                            break
-                                elif isinstance(content, str):
-                                    text = content.strip()
-                                if text and not text.startswith('<') and not text.startswith('['):
-                                    sess['intent'] = text[:80]
-                                    changed = True
-                                    break
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                title = _resolve_session_title(sess)
+                if title and title != sess.get('title'):
+                    sess['title'] = title
+                    changed = True
             if changed:
-                try:
-                    with open(SESSIONS_FILE, 'w') as f:
-                        json.dump(self._sessions, f)
-                except Exception:
-                    pass
+                self._save_sessions()
+
+        def _prune_dead_sessions(self) -> bool:
+            """Drop sessions that have ended. Returns True if anything was removed.
+
+            The session_end hook does not fire when a desktop conversation is closed, so
+            without this the store grows phantom rows forever. Transcript mtime is the one
+            liveness signal that works for both terminal and desktop sessions.
+            """
+            now = time.time()
+            records = _desktop_records()
+            dead = [sid for sid, sess in self._sessions.items()
+                    if _is_session_dead(sess, now, records)]
+            for sid in dead:
+                del self._sessions[sid]
+                self._thinking_sessions.pop(sid, None)
+            if dead:
+                self._session_count = len(self._sessions)
+                self._save_sessions()
+            return bool(dead)
+
+        def _save_sessions(self):
+            try:
+                with open(SESSIONS_FILE, 'w') as f:
+                    json.dump(self._sessions, f)
+            except Exception:
+                pass
 
         def _deferred_intent_refresh(self, session_id: str):
             sess = self._sessions.get(session_id)
-            if not sess or sess.get('intent'):
+            if not sess:
                 return
-            self._refresh_session_intents()
+            self._refresh_session_titles()
             if self._session_rows_visible:
                 self._rebuild_session_rows()
 
         def _show_session_rows(self):
             if self._session_rows_visible:
                 return  # already shown, avoid double-installing click filter
+            self._prune_dead_sessions()
             if not self._sessions:
                 return
-            self._refresh_session_intents()
+            self._refresh_session_titles()
             self._repopulate_session_rows_layout()
             self._session_rows_container.adjustSize()
             rows_h = self._session_rows_container.sizeHint().height()
@@ -1017,6 +1214,13 @@ def run_daemon():
 
         def _cleanup_stale_requests(self):
             """Remove requests whose notify.sh process has exited."""
+            # This runs on a 500ms timer; pruning stats the filesystem per session, so
+            # rate-limit it rather than doing that twice a second.
+            if time.time() - self._last_prune > 30:
+                self._last_prune = time.time()
+                if self._prune_dead_sessions() and self._session_rows_visible:
+                    self._rebuild_session_rows()
+
             # Prune thinking sessions whose Stop hook never fired.
             # Fast path: session ended (sid left _sessions) but thinking_stop
             # didn't fire — reliable when session tracking works.
@@ -1551,13 +1755,17 @@ end tell
                     subprocess.run(["osascript", "-e", f'tell application "{app}" to activate'], capture_output=True)
                     return
 
-            # 3. No UUID — for explicit desktop source, deep-link into Claude Code session
+            # 3. No UUID — desktop session. Conversation-level navigation is not available:
+            # the claude://code handler validates the id against /^(cse|session)_/, which
+            # only matches cloud sessions. Local conversations are local_<uuid>, and both
+            # claude://code/local_… and claude://epitaxy/local_… are rejected (verified
+            # against Claude 1.34493.1 — neither updates the record's lastFocusedAt).
+            # Best available action is to bring the app forward.
             if source == "desktop":
-                if session_id:
-                    # claude://code/<session_id> navigates directly to that conversation
-                    result = subprocess.run(["open", f"claude://code/{session_id}"], capture_output=True)
-                    if result.returncode == 0:
-                        return
+                record = _desktop_records().get(session_id, {})
+                print(f"[buddy] desktop session {session_id}: activating Claude "
+                      f"(no deep link for local conversation "
+                      f"{record.get('session_id', 'unknown')})", file=sys.stderr)
                 if _is_running("Claude"):
                     subprocess.run(["osascript", "-e", 'tell application "Claude" to activate'], capture_output=True)
                 return
@@ -1710,32 +1918,6 @@ end tell
     from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
     NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
-    def _read_intent_from_transcript(transcript_path):
-        """Return first real user message from a transcript, or ''."""
-        try:
-            with open(transcript_path, 'r', errors='replace') as f:
-                for line in f:
-                    try:
-                        d = json.loads(line)
-                        if d.get('type') != 'user':
-                            continue
-                        content = d.get('message', {}).get('content', '')
-                        if isinstance(content, list):
-                            for c in content:
-                                if isinstance(c, dict) and c.get('type') == 'text':
-                                    text = c['text'].strip()
-                                    if text and not text.startswith('<') and not text.startswith('['):
-                                        return text[:80]
-                        elif isinstance(content, str):
-                            text = content.strip()
-                            if text and not text.startswith('<') and not text.startswith('['):
-                                return text[:80]
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        return ''
-
     def _load_persisted_sessions():
         """Load sessions from file + scan transcripts as fallback. Returns {session_id: payload}."""
         sessions = {}
@@ -1767,14 +1949,22 @@ end tell
                     fpath = os.path.join(project_dir, fname)
                     try:
                         mtime = os.path.getmtime(fpath)
-                        if now - mtime > SESSIONS_STALE_SECS:
+                        # Scanned sessions carry no hook evidence that they are still
+                        # open, so they need a tighter window than hook-registered ones.
+                        if now - mtime > SCAN_ACTIVE_SECS:
+                            continue
+                        # No title entry means Claude Code never named it: a headless
+                        # `claude -p` run from a hook, not a conversation worth listing.
+                        if not _read_session_meta(fpath).get('title'):
                             continue
                         sessions[sid] = {
                             'session_id': sid,
                             'folder': folder,
                             'cwd': '/' + encoded.lstrip('-').replace('-', '/'),
                             'intent': '',
+                            'title': '',
                             'source': 'unknown',
+                            'scanned': True,
                             'iterm_session_id': '',
                             'transcript_path': fpath,
                             'ts': mtime,
@@ -1782,23 +1972,21 @@ end tell
                     except Exception:
                         pass
 
-        # Prune stale, enrich empty intents, save back if changed
+        # Prune dead sessions, resolve titles, save back if changed
         valid = {}
         changed = False
+        records = _desktop_records()
         for sid, sess in sessions.items():
-            tp = sess.get('transcript_path', '')
-            if tp and os.path.exists(tp):
-                try:
-                    if now - os.path.getmtime(tp) > SESSIONS_STALE_SECS:
-                        changed = True
-                        continue
-                except Exception:
-                    pass
-            if not sess.get('intent') and tp:
-                intent = _read_intent_from_transcript(tp)
-                if intent:
-                    sess['intent'] = intent
-                    changed = True
+            sess.setdefault('session_id', sid)
+            # Previously a session whose transcript had been deleted was kept, which is how
+            # the store accumulated phantom rows.
+            if _is_session_dead(sess, now, records):
+                changed = True
+                continue
+            title = _resolve_session_title(sess)
+            if title and title != sess.get('title'):
+                sess['title'] = title
+                changed = True
             valid[sid] = sess
 
         if changed:
