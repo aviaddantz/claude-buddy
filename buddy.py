@@ -1203,10 +1203,10 @@ def run_daemon():
 
         def _highest_risk(self):
             priority = {"high": 2, "medium": 1, "low": 0}
-            best = "medium"
+            best = "low"
             for req in self._requests:
                 risk = req.get("risk", "medium")
-                if priority.get(risk, 1) > priority.get(best, 1):
+                if priority.get(risk, 1) > priority.get(best, 0):
                     best = risk
             return best
 
