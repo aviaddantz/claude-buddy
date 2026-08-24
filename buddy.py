@@ -784,6 +784,21 @@ def run_daemon():
                 self._badge.move(200 - 9, self._sprite_h + rows_h - 9)
             self.sprite.move((200 - 40) // 2, self._flip_pills_h + self._sprite_rest_y)
 
+        def _update_mask(self):
+            from PyQt6.QtGui import QRegion
+            from PyQt6.QtCore import QRect
+            sprite_region = QRegion(QRect(
+                self.sprite.x(), 0,
+                self.sprite.width(), self.sprite.height() + self._sprite_rest_y
+            ))
+            has_content = self._container_layout.count() > 0 or self._session_rows_visible
+            if not has_content:
+                self.setMask(sprite_region)
+            else:
+                content_h = self.height() - self._sprite_h
+                content_region = QRegion(QRect(0, self._sprite_h, 200, max(content_h, 0)))
+                self.setMask(sprite_region | content_region)
+
         def _update_window_size(self):
             total_pills_h = 0
             for i in range(self._container_layout.count()):
@@ -799,6 +814,7 @@ def run_daemon():
             total_h = self._sprite_h + rows_h + total_pills_h
             self.setFixedHeight(max(total_h, self._sprite_h + 10))
             self._apply_flip_layout(total_pills_h, rows_h)
+            self._update_mask()
 
         def _update_window_size_for_pill(self, pill):
             """Resize window after a single pill's internal height changed, without touching other pills."""
@@ -816,6 +832,7 @@ def run_daemon():
             total_h = self._sprite_h + rows_h + total_pills_h
             self.setFixedHeight(max(total_h, self._sprite_h + 10))
             self._apply_flip_layout(total_pills_h, rows_h)
+            self._update_mask()
 
         # ── Sessions ───────────────────────────────────────────────────────────
 
@@ -1332,6 +1349,7 @@ def run_daemon():
             if not self._bob_timer.isActive():
                 self._bob_tick = 0
                 self._bob_timer.start()
+            self._update_mask()
             if not self.isVisible():
                 saved_x, saved_y = self._load_saved_position()
                 if saved_x is not None:
@@ -1382,6 +1400,7 @@ def run_daemon():
             self.sprite.update()
             self._container.hide()
             self._badge.hide()
+            self._update_mask()
             if not self.isVisible():
                 saved_x, saved_y = self._load_saved_position()
                 if saved_x is not None:
