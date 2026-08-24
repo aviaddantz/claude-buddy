@@ -1481,10 +1481,34 @@ def run_daemon():
                     data = json.load(f)
                     x, y = data.get("x"), data.get("y")
                     if isinstance(x, int) and isinstance(y, int):
-                        return x, y
+                        return self._clamp_to_screens(x, y)
             except Exception:
                 pass
             return None, None
+
+        @staticmethod
+        def _clamp_to_screens(x: int, y: int, w: int = 200, h: int = 124):
+            """Pull a restored position back onto a screen that still exists.
+
+            Positions are absolute desktop coordinates, so unplugging a monitor strands the
+            widget in dead space -- it is running and responding, it just cannot be seen,
+            which is indistinguishable from nudge being broken.
+            """
+            screens = QApplication.screens()
+            if not screens:
+                return x, y
+            EDGE = 60  # how much of the widget has to be on a screen to count as visible
+            for screen in screens:
+                g = screen.availableGeometry()
+                if (x + EDGE > g.left() and x < g.right() - EDGE
+                        and y + EDGE > g.top() and y < g.bottom() - EDGE):
+                    return x, y
+            g = QApplication.primaryScreen().availableGeometry()
+            clamped = (min(max(x, g.left()), g.right() - w),
+                       min(max(y, g.top()), g.bottom() - h))
+            print(f"[buddy] saved position {x},{y} is off-screen; moved to "
+                  f"{clamped[0]},{clamped[1]}", file=sys.stderr)
+            return clamped
 
         def _save_position(self):
             try:
