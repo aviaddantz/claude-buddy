@@ -79,7 +79,7 @@ def clean_mcp(tool_name):
 def extract_value(inp_dict):
     """Pick the most meaningful field from tool_input, in priority order."""
     FIELD_ORDER = ["command", "question", "query", "description",
-                   "url", "file_path", "path", "pattern", "text", "prompt"]
+                   "url", "file_path", "path", "pattern", "text", "prompt", "plan"]
     for key in FIELD_ORDER:
         val = inp_dict.get(key)
         if val and str(val).strip():
@@ -114,10 +114,13 @@ def out(intent, risk, mode="approval"):
 LOW_TOOLS = {
     "read", "glob", "grep", "webfetch", "websearch",
     "askuserquestion", "taskget", "tasklist", "taskoutput",
-    "exitplanmode", "enterplanmode", "toolsearch",
+    "enterplanmode", "toolsearch",
     "listmcpresourcestool", "readmcpresourcetool",
     "exitworktree", "enterworktree",
 }
+# ExitPlanMode is the single highest-stakes approval point in a session --
+# accepting a plan hands Claude free rein to execute it. It must go through
+# the real pill flow, not the low-risk silent auto-approve path.
 
 HIGH_BASH_PATTERNS = [
     r"\brm\b", r"\brmdir\b",
@@ -240,6 +243,7 @@ else:
         "webfetch": "Fetch",
         "listmcpresourcestool": "List MCP",
         "readmcpresourcetool": "Read MCP",
+        "exitplanmode": "Plan",
     }
     label = LABELS.get(tool_lower, tool)
 
