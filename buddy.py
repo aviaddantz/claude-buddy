@@ -1017,7 +1017,8 @@ def run_daemon():
                 Qt.WindowType.WindowStaysOnTopHint |
                 Qt.WindowType.FramelessWindowHint |
                 Qt.WindowType.Tool |
-                Qt.WindowType.NoDropShadowWindowHint
+                Qt.WindowType.NoDropShadowWindowHint |
+                Qt.WindowType.WindowDoesNotAcceptFocus
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -1116,6 +1117,8 @@ def run_daemon():
             self.setMouseTracking(True)
             self.winId()  # Force NSWindow creation now so the pin timer finds it
             QTimer.singleShot(100, self._pin_to_all_spaces)
+            self._last_external_app = None
+            self._watch_foreground_app()
             if self._idle_visible:
                 QTimer.singleShot(500, self._show_idle)
 
@@ -1565,9 +1568,37 @@ def run_daemon():
                 self._update_window_size()  # recompute flip layout for new position
                 self._reanchor()
                 self._save_position()
+                self._restore_previous_app()
                 event.accept()
                 return
             super().mouseReleaseEvent(event)
+
+        def _watch_foreground_app(self):
+            """Track whichever app is frontmost, so a click on the sprite (which macOS
+            always activates our app for) can hand focus back afterward."""
+            try:
+                from AppKit import NSWorkspace
+                my_pid = os.getpid()
+                def _on_activate(notification):
+                    app = notification.userInfo().get("NSWorkspaceApplicationKey")
+                    if app is not None and app.processIdentifier() != my_pid:
+                        self._last_external_app = app
+                NSWorkspace.sharedWorkspace().notificationCenter() \
+                    .addObserverForName_object_queue_usingBlock_(
+                        "NSWorkspaceDidActivateApplicationNotification", None, None, _on_activate)
+            except Exception as e:
+                print(f"[buddy] _watch_foreground_app failed: {e}", file=sys.stderr)
+
+        def _restore_previous_app(self):
+            """Reactivate whatever app was frontmost before the sprite was clicked."""
+            app = self._last_external_app
+            if app is None:
+                return
+            try:
+                from AppKit import NSApplicationActivateIgnoringOtherApps
+                app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+            except Exception as e:
+                print(f"[buddy] _restore_previous_app failed: {e}", file=sys.stderr)
 
         def mouseDoubleClickEvent(self, event):
             if event.button() == Qt.MouseButton.LeftButton:
