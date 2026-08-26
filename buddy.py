@@ -655,7 +655,7 @@ def run_daemon():
         activated     = pyqtSignal(int)        # index within parent queue
         expand_changed = pyqtSignal(bool)      # True=expanded, False=collapsed
 
-        def __init__(self, req: dict, index: int, is_active: bool, parent=None):
+        def __init__(self, req: dict, index: int, is_active: bool, sessions: dict = None, parent=None):
             super().__init__(parent)
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self._req = req
@@ -693,6 +693,23 @@ def run_daemon():
             self._source_label.setFixedHeight(16)
             self._source_label.setVisible(bool(cwd))
             pill_layout.addWidget(self._source_label)
+
+            # Session title — same value shown in the double-click session list, so
+            # multiple pending pills can be told apart at a glance.
+            sessions = sessions or {}
+            sess = sessions.get(req.get("session_id", ""), {})
+            title = _resolve_session_title(sess) if sess else ""
+            if title:
+                title_lbl = QLabel()
+                title_lbl.setStyleSheet(
+                    "font-size: 10px; font-weight: 600; color: #9c8aff;"
+                    " padding: 0px; margin: 0px;"
+                )
+                title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                title_lbl.setFixedHeight(14)
+                fm_title = title_lbl.fontMetrics()
+                title_lbl.setText(fm_title.elidedText(title, Qt.TextElideMode.ElideRight, 200 - 24))
+                pill_layout.addWidget(title_lbl)
 
             # Intent (elided — full text shown in expanded_widget when open)
             intent = req.get("intent", "Waiting for approval")
@@ -1220,7 +1237,7 @@ def run_daemon():
 
             for i, req in enumerate(self._requests):
                 is_active = (i == self._current_index)
-                pill = _SessionPill(req, i, is_active)
+                pill = _SessionPill(req, i, is_active, sessions=self._sessions)
 
                 # Wire signals
                 pill.approved.connect(self._on_pill_approved)
