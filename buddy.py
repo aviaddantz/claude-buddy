@@ -12,6 +12,7 @@ import sys
 import os
 import calendar
 import json
+import shlex
 import socket
 import subprocess
 import signal
@@ -31,6 +32,13 @@ DESKTOP_RECORDS_GLOB = os.path.expanduser(
     "~/Library/Application Support/Claude/claude-code-sessions/*/*/local_*.json"
 )
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
+
+# Folders offered by the sprite's right-click launcher, in menu order. Label first so the
+# menu never has to show a full path.
+LAUNCH_FOLDERS = [
+    ("my os", os.path.expanduser("~/Documents/my os")),
+    ("nudge", os.path.expanduser("~/Development/nudge")),
+]
 
 
 def _iso_to_epoch(ts: str) -> float:
@@ -190,6 +198,99 @@ def _resolve_session_title(sess: dict) -> str:
     if meta.get('prompt'):
         return meta['prompt'][:80]
     return (sess.get('intent') or '').strip()
+
+
+# ── Starting new sessions ──────────────────────────────────────────────────────
+
+
+def _log_launch(message: str):
+    try:
+        with open("/tmp/claude-buddy.log", "a") as f:
+            f.write(f"[buddy launch] {message}\n")
+    except OSError:
+        pass
+
+
+def _applescript_str(text: str) -> str:
+    """Wrap text as an AppleScript string literal."""
+    return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def launch_session(target: str, cwd: str) -> bool:
+    """Start a new Claude Code session in `cwd` via a fresh iTerm2 window.
+
+    The session registers itself through the SessionStart hook, so nothing here has to
+    tell the daemon about it.
+
+    Never raises: there is no error surface in the widget, so failures are logged.
+    """
+    if not os.path.isdir(cwd):
+        _log_launch(f"{target}: no such folder {cwd}")
+        return False
+
+    # iTerm opens a login shell, so `claude` resolves on PATH without extra work.
+    command = 'cd ' + shlex.quote(cwd) + ' && claude'
+    cmd_literal = _applescript_str(command)
+
+    # iTerm2 occasionally hands back a reference to an *existing* window from
+    # "create window with default profile" instead of actually creating one
+    # (osascript still exits 0), so the id is checked against the pre-existing
+    # set before trusting it.
+    script = (
+        'tell application "iTerm2"\n'
+        '  activate\n'
+        '  set beforeIds to id of windows\n'
+        '  set w to (create window with default profile)\n'
+        '  set newId to (id of w)\n'
+        f'  tell current session of w to write text {cmd_literal}\n'
+        '  if beforeIds contains newId then\n'
+        '    return "reused"\n'
+        '  else\n'
+        '    return "created"\n'
+        '  end if\n'
+        'end tell'
+    )
+    try:
+        result = subprocess.run(['osascript', '-e', script], timeout=20,
+                                capture_output=True, text=True)
+    except Exception as e:
+        _log_launch(f"iterm: osascript failed for {cwd}: {e}")
+        return False
+    if result.returncode != 0:
+        _log_launch(f"iterm: osascript exited {result.returncode} for {cwd}: "
+                    f"{result.stderr.strip()}")
+        return False
+
+    if result.stdout.strip() != "reused":
+        _log_launch(f"iterm: opened {cwd}")
+        return True
+
+    # Fallback: force a real new window via Cmd+N, then type the command into it.
+    _log_launch(f"iterm: create window reused an existing window for {cwd}, forcing Cmd+N")
+    fallback_script = (
+        'tell application "iTerm2"\n'
+        '  activate\n'
+        'end tell\n'
+        'tell application "System Events"\n'
+        '  keystroke "n" using command down\n'
+        'end tell\n'
+        'delay 0.5\n'
+        'tell application "iTerm2"\n'
+        f'  tell current session of current window to write text {cmd_literal}\n'
+        'end tell'
+    )
+    try:
+        result = subprocess.run(['osascript', '-e', fallback_script], timeout=20,
+                                capture_output=True, text=True)
+    except Exception as e:
+        _log_launch(f"iterm: fallback osascript failed for {cwd}: {e}")
+        return False
+    if result.returncode != 0:
+        _log_launch(f"iterm: fallback osascript exited {result.returncode} for {cwd}: "
+                    f"{result.stderr.strip()}")
+        return False
+    _log_launch(f"iterm: opened {cwd} via Cmd+N fallback")
+    return True
 
 
 # ── Claude Desktop conversation focus (accessibility) ──────────────────────────
@@ -651,7 +752,7 @@ def run_daemon():
         approved      = pyqtSignal(str)        # pipe path
         denied        = pyqtSignal(str)        # pipe path
         always        = pyqtSignal(str, str)   # pipe path, destination ("session"/"project")
-        go_session    = pyqtSignal(str, str)   # iterm_session, term_program
+        go_session    = pyqtSignal(str, str, str, str, str)   # iterm_session, term_program, source, cwd, session_id
         activated     = pyqtSignal(int)        # index within parent queue
         expand_changed = pyqtSignal(bool)      # True=expanded, False=collapsed
 
@@ -853,8 +954,10 @@ def run_daemon():
             }
             if req.get("iterm_session"):
                 _go_label = "Go to session"
+            elif req.get("source") == "desktop":
+                _go_label = "Open Claude Code Desktop"
             else:
-                _go_label = _TERM_LABELS.get(req.get("term_program", "").lower(), "Open Claude")
+                _go_label = _TERM_LABELS.get(req.get("term_program", "").lower(), "Open Claude Code Desktop")
             go_btn = QPushButton(_go_label)
             go_btn.setStyleSheet(go_style)
             go_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -862,6 +965,9 @@ def run_daemon():
                 lambda: self.go_session.emit(
                     req.get("iterm_session", ""),
                     req.get("term_program", ""),
+                    req.get("source", ""),
+                    req.get("cwd", ""),
+                    req.get("session_id", ""),
                 )
             )
             exp_layout.addWidget(go_btn)
@@ -1558,7 +1664,47 @@ def run_daemon():
                     self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
                     event.accept()
                     return
+            if event.button() == Qt.MouseButton.RightButton:
+                if self.sprite.hit_rect().contains(event.position().toPoint()):
+                    self._show_launch_menu(event.globalPosition().toPoint())
+                    event.accept()
+                    return
             super().mousePressEvent(event)
+
+        LAUNCH_MENU_QSS = """
+            QMenu { background: #1c1c1c; border: 1px solid #333; border-radius: 8px;
+                    padding: 5px; color: #e0e0e0; font-size: 12px; }
+            QMenu::item { padding: 5px 22px 5px 10px; border-radius: 4px; }
+            QMenu::item:selected { background: #7c6af7; color: #fff; }
+            QMenu::item:disabled { color: #6a6a6a; font-size: 10px; }
+            QMenu::right-arrow { image: none; }
+        """
+
+        def _show_launch_menu(self, global_pos):
+            """Right-click menu on the sprite: pick a folder, then where it opens."""
+            from PyQt6.QtWidgets import QMenu
+            menu = QMenu(self)
+            menu.setStyleSheet(self.LAUNCH_MENU_QSS)
+
+            header = menu.addAction("NEW SESSION")
+            header.setEnabled(False)
+
+            chosen = {}
+            for label, folder in LAUNCH_FOLDERS:
+                action = menu.addAction(label)
+                action.triggered.connect(
+                    lambda _checked=False, f=folder: chosen.update(target='iterm', cwd=f)
+                )
+
+            menu.exec(global_pos)
+
+            # macOS activates Nudge on any click into its window. On a launch that is what we
+            # want, since the new terminal should come forward; on a dismissed
+            # menu it would leave the user typing into the widget, so hand focus back.
+            if chosen:
+                launch_session(chosen['target'], chosen['cwd'])
+            else:
+                self._restore_previous_app()
 
         def mouseMoveEvent(self, event):
             if self._drag_offset is not None and event.buttons() == Qt.MouseButton.LeftButton:
@@ -1873,8 +2019,9 @@ def run_daemon():
             _write_decision("always_allow", pipe)
             self._remove_by_pipe(pipe)
 
-        def _on_pill_go_session(self, iterm_session: str, term_program: str):
-            self._focus_terminal_with_session(iterm_session, term_program)
+        def _on_pill_go_session(self, iterm_session: str, term_program: str, source: str = "",
+                                  cwd: str = "", session_id: str = ""):
+            self._focus_terminal_with_session(iterm_session, term_program, source, cwd, session_id)
 
         def _on_pill_activated(self, index: int):
             self._current_index = index
