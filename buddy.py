@@ -216,11 +216,15 @@ def _applescript_str(text: str) -> str:
     return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-def launch_session(target: str, cwd: str) -> bool:
+def launch_session(target: str, cwd: str, no_axcli: bool = False) -> bool:
     """Start a new Claude Code session in `cwd` via a fresh iTerm2 window.
 
     The session registers itself through the SessionStart hook, so nothing here has to
     tell the daemon about it.
+
+    `no_axcli=True` bypasses the axcli-managed `claude` shim on PATH and runs the
+    native Claude Code binary directly, with its own config dir so it doesn't share
+    axcli's budget/session state.
 
     Never raises: there is no error surface in the widget, so failures are logged.
     """
@@ -228,8 +232,16 @@ def launch_session(target: str, cwd: str) -> bool:
         _log_launch(f"{target}: no such folder {cwd}")
         return False
 
-    # iTerm opens a login shell, so `claude` resolves on PATH without extra work.
-    command = 'cd ' + shlex.quote(cwd) + ' && claude'
+    if no_axcli:
+        # ~/.local/bin/claude is the native Claude Code CLI; PATH would otherwise
+        # resolve `claude` to the axcli shim at ~/.axcli/bin/claude first.
+        command = (
+            'cd ' + shlex.quote(cwd) +
+            ' && CLAUDE_CONFIG_DIR="$HOME/.claude-no-axcli" ~/.local/bin/claude'
+        )
+    else:
+        # iTerm opens a login shell, so `claude` resolves on PATH without extra work.
+        command = 'cd ' + shlex.quote(cwd) + ' && claude'
     cmd_literal = _applescript_str(command)
 
     # iTerm2 occasionally hands back a reference to an *existing* window from
@@ -1684,6 +1696,7 @@ def run_daemon():
             """Right-click menu on the sprite: pick a folder, then where it opens."""
             from PyQt6.QtWidgets import QMenu
             menu = QMenu(self)
+            menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             menu.setStyleSheet(self.LAUNCH_MENU_QSS)
 
             header = menu.addAction("NEW SESSION")
@@ -1691,9 +1704,17 @@ def run_daemon():
 
             chosen = {}
             for label, folder in LAUNCH_FOLDERS:
-                action = menu.addAction(label)
-                action.triggered.connect(
-                    lambda _checked=False, f=folder: chosen.update(target='iterm', cwd=f)
+                submenu = menu.addMenu(label)
+                submenu.setStyleSheet(self.LAUNCH_MENU_QSS)
+
+                with_axcli = submenu.addAction("With axcli")
+                with_axcli.triggered.connect(
+                    lambda _checked=False, f=folder: chosen.update(target='iterm', cwd=f, no_axcli=False)
+                )
+
+                without_axcli = submenu.addAction("Without axcli")
+                without_axcli.triggered.connect(
+                    lambda _checked=False, f=folder: chosen.update(target='iterm', cwd=f, no_axcli=True)
                 )
 
             menu.exec(global_pos)
@@ -1702,7 +1723,7 @@ def run_daemon():
             # want, since the new terminal should come forward; on a dismissed
             # menu it would leave the user typing into the widget, so hand focus back.
             if chosen:
-                launch_session(chosen['target'], chosen['cwd'])
+                launch_session(chosen['target'], chosen['cwd'], no_axcli=chosen.get('no_axcli', False))
             else:
                 self._restore_previous_app()
 
