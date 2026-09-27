@@ -758,12 +758,22 @@ def run_daemon():
             painter.drawPath(path)
             painter.end()
 
+    def _autoapprove_link_text(req: dict) -> str:
+        tool = req.get("tool", "")
+        if tool.lower() == "bash":
+            tool_input = req.get("tool_input", {})
+            cmd = str(tool_input.get("command", "")).strip() if isinstance(tool_input, dict) else ""
+            first_word = cmd.split()[0] if cmd else "this command"
+            return f"Always allow \"{first_word}\" commands"
+        return f"Always allow {tool}" if tool else "Always allow this tool"
+
     class _SessionPill(QWidget):
         """Self-contained pill for one pending session request."""
 
         approved      = pyqtSignal(str)        # pipe path
         denied        = pyqtSignal(str)        # pipe path
         always        = pyqtSignal(str, str)   # pipe path, destination ("session"/"project")
+        autoapprove_rule = pyqtSignal(str)     # pipe path — add this tool/command to the local auto-approve list
         go_session    = pyqtSignal(str, str, str, str, str)   # iterm_session, term_program, source, cwd, session_id
         activated     = pyqtSignal(int)        # index within parent queue
         expand_changed = pyqtSignal(bool)      # True=expanded, False=collapsed
@@ -983,6 +993,26 @@ def run_daemon():
                 )
             )
             exp_layout.addWidget(go_btn)
+
+            if not is_attention:
+                autoapprove_divider = QFrame()
+                autoapprove_divider.setFrameShape(QFrame.Shape.HLine)
+                autoapprove_divider.setStyleSheet("color: #222; background: #222;")
+                autoapprove_divider.setFixedHeight(1)
+                exp_layout.addWidget(autoapprove_divider)
+
+                autoapprove_label = _autoapprove_link_text(req)
+                autoapprove_lbl = QLabel(autoapprove_label)
+                autoapprove_lbl.setStyleSheet(
+                    "font-size: 10px; color: #7c6af7; padding: 4px 0px 0px 0px; margin: 0px;"
+                )
+                autoapprove_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                autoapprove_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+                autoapprove_lbl.setWordWrap(True)
+                autoapprove_lbl.mousePressEvent = (
+                    lambda event, pipe=req.get("pipe", DECISION_PIPE): self.autoapprove_rule.emit(pipe)
+                )
+                exp_layout.addWidget(autoapprove_lbl)
 
             pill_layout.addWidget(self._expanded_widget)
 
@@ -1692,12 +1722,49 @@ def run_daemon():
             QMenu::right-arrow { image: none; }
         """
 
+        def _add_autoapprove_rule(self, kind: str, value: str):
+            """Append a rule to ~/.nudge-autoapprove.json ('tools' or 'bash_commands')."""
+            path = os.path.expanduser("~/.nudge-autoapprove.json")
+            try:
+                with open(path) as f:
+                    cfg = json.load(f)
+            except Exception:
+                cfg = {"tools": [], "bash_commands": [], "bash_patterns": []}
+            bucket = cfg.setdefault(kind, [])
+            if value not in bucket:
+                bucket.append(value)
+            with open(path, "w") as f:
+                json.dump(cfg, f, indent=2)
+                f.write("\n")
+
         def _show_launch_menu(self, global_pos):
-            """Right-click menu on the sprite: pick a folder, then where it opens."""
+            """Right-click menu on the sprite: always-approve rule for the active pill (if any), then pick a folder to launch."""
             from PyQt6.QtWidgets import QMenu
             menu = QMenu(self)
             menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             menu.setStyleSheet(self.LAUNCH_MENU_QSS)
+
+            autoapprove_choice = {}
+            if self._requests:
+                req = self._requests[self._current_index]
+                tool = req.get("tool", "")
+                tool_input = req.get("tool_input", {})
+                header = menu.addAction("AUTO-APPROVE")
+                header.setEnabled(False)
+                if tool.lower() == "bash":
+                    cmd = str(tool_input.get("command", "")).strip() if isinstance(tool_input, dict) else ""
+                    first_word = cmd.split()[0] if cmd else ""
+                    if first_word:
+                        act = menu.addAction(f"Always allow “{first_word}” commands")
+                        act.triggered.connect(
+                            lambda _checked=False, v=first_word: autoapprove_choice.update(kind="bash_commands", value=v)
+                        )
+                else:
+                    act = menu.addAction(f"Always allow {tool}")
+                    act.triggered.connect(
+                        lambda _checked=False, v=tool.lower(): autoapprove_choice.update(kind="tools", value=v)
+                    )
+                menu.addSeparator()
 
             header = menu.addAction("NEW SESSION")
             header.setEnabled(False)
@@ -1718,6 +1785,13 @@ def run_daemon():
                 )
 
             menu.exec(global_pos)
+
+            if autoapprove_choice:
+                self._add_autoapprove_rule(autoapprove_choice["kind"], autoapprove_choice["value"])
+                req = self._requests[self._current_index]
+                _write_decision("allow", req.get("pipe", DECISION_PIPE))
+                self._remove_by_pipe(req.get("pipe", DECISION_PIPE))
+                return
 
             # macOS activates Nudge on any click into its window. On a launch that is what we
             # want, since the new terminal should come forward; on a dismissed
