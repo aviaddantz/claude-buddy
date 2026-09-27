@@ -763,9 +763,14 @@ def run_daemon():
         if tool.lower() == "bash":
             tool_input = req.get("tool_input", {})
             cmd = str(tool_input.get("command", "")).strip() if isinstance(tool_input, dict) else ""
-            first_word = cmd.split()[0] if cmd else "this command"
+            first_word = "this command"
+            for token in cmd.split():
+                if "=" not in token:
+                    first_word = token[:20]
+                    break
             return f"Always allow \"{first_word}\" commands"
-        return f"Always allow {tool}" if tool else "Always allow this tool"
+        label = (tool[:20] if tool else "this tool")
+        return f"Always allow {label}"
 
     class _SessionPill(QWidget):
         """Self-contained pill for one pending session request."""
